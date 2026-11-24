@@ -9,6 +9,19 @@ DTC_FLAGS += -p 1024
 
 dtbo-$(CONFIG_ALI_DTB) += sdm450-ali-evt-overlay.dtbo
 
+# ali: also build full standalone DTBs per board revision (base + overlay
+# merged in sdm450-ali.dtsi) for bootloaders that select an appended DTB
+# by board-id and do not apply DTBOs.
+ifeq ($(CONFIG_ALI_DTB),y)
+dtb-$(CONFIG_ARCH_SDM450) += sdm450-ali-p0a.dtb \
+	sdm450-ali-evt2.dtb \
+	sdm450-ali-dvt1a.dtb \
+	sdm450-ali-dvt1b.dtb \
+	sdm450-ali-dvt2.dtb \
+	sdm450-ali-pvt1.dtb \
+	sdm450-ali-pvt2.dtb
+endif
+
 dtbo-$(CONFIG_RIVER_DTB) += \
 	sdm632-river-evt-overlay.dtbo \
 	sdm632-river-na-evt-overlay.dtbo \

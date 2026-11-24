@@ -1,0 +1,108 @@
+/*
+ * Merged ali DT: base (sdm450-ali-base.dts body) + common overlay, built as a
+ * single standalone DTB so the bootloader needs no DTBO support.
+ */
+
+#include "sdm450-moto-base.dtsi"
+
+/*
+ * The 3.18 ali DTBs carry no qcom,pmic-id and the Motorola bootloader picks
+ * them by msm-id/board-id only. Do not let the base's pmic-id restrict
+ * bootloader DTB matching.
+ */
+/ {
+	/delete-property/ qcom,pmic-id;
+	/delete-property/ qcom,pmic-name;
+};
+
+&aliases {
+	/delete-property/ spi3;
+};
+
+&soc {
+	/delete-node/ gpio_keys;
+	/delete-node/ spi@78b7000;
+
+	/delete-node/ sound;
+	/delete-node/ sound-9335;
+	/delete-node/ wsa881x_analog_clk_pctrl;
+	/delete-node/ wsa881x_analog_reset_pctrl;
+	/delete-node/ msm_cdc_pinctrl_us_euro_sw;
+	/delete-node/ cdc_comp_pinctrl;
+	/delete-node/ msm_cdc_pinctrl_pri;
+	/delete-node/ msm_cdc_pinctrl_quin;
+	/delete-node/ wsa881x_analog_vi_pctrl;
+};
+
+&mdss_dsi0 {
+	/delete-property/ vdd-supply;
+};
+
+&mdss_dsi1_pll {
+	/delete-property/ qcom,dsi-pll-ssc-en;
+	/delete-property/ qcom,dsi-pll-ssc-mode;
+};
+
+/* the node cannot be deleted from sdm450-ali-pinctrl.dtsi
+&tlmm {
+	/delete-node/ tlmm_gpio_key;
+};
+*/
+
+&i2c_2 {
+	/delete-node/ wsa881x-i2c-codec@f;
+	/delete-node/ wsa881x-i2c-codec@45;
+};
+
+&i2c_5 { /* BLSP2 QUP1 (NFC) */
+	/delete-node/ nq@28;
+};
+
+&slim_msm {
+	/delete-node/ tasha_codec;
+};
+
+&qpnp_smbcharger {
+	/delete-property/ qcom,external-typec;
+	/delete-property/ qcom,typec-psy-name;
+};
+
+/*
+ * First-stage init mounts /system and /vendor from this DT fstab (the 3.18
+ * ali DT had both). The 4.9 base only has /vendor, so init could not exec
+ * /system/bin/init and the device rebooted to the bootloader.
+ */
+&firmware {
+	android {
+		fstab {
+			system {
+				compatible = "android,system";
+				dev = "/dev/block/platform/soc/7824900.sdhci/by-name/system";
+				type = "ext4";
+				mnt_flags = "ro,barrier=1,discard";
+				fsmgr_flags = "wait,verify";
+				status = "ok";
+			};
+
+			vendor {
+				fsmgr_flags = "wait,verify";
+			};
+		};
+	};
+};
+
+/*
+ * The ali bootloader (MBM) already registers the secure-app region with TZ.
+ * Without qcom,appsbl-qseecom-support the 4.9 qseecom driver registers it a
+ * second time, TZ refuses (-8), qseecom fails to probe and keymaster /
+ * gatekeeper abort (Android hangs on the boot animation). cmnlib64 is not
+ * loaded by the bootloader, so drop commonlib64-loaded-by-uefi like 3.18.
+ */
+&qcom_seecom {
+	qcom,appsbl-qseecom-support;
+	/delete-property/ qcom,commonlib64-loaded-by-uefi;
+};
+
+/* ---- former overlay content ---- */
+#include "sdm450-ali-common-overlay.dtsi"
+#include <dt-bindings/clock/msm-clocks-8953.h>

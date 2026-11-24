@@ -170,7 +170,16 @@ endif
 KBUILD_DTBS	:= dtbs
 
 ifeq ($(CONFIG_BUILD_ARM64_DT_OVERLAY),y)
+ifeq ($(CONFIG_ALI_DTB),y)
+# ali: the bootloader seems to reject appended DTBs > 256KiB; the standalone
+# ali DTBs do not need overlay symbols (/__symbols__), which is ~15% of size.
+# Keep the 1KiB bootloader padding (-p 1024) in the *global* flags: the
+# Image.gz-dtb rule compiles DTBs outside qcom/Makefile's scope, and without
+# padding the Motorola bootloader fails to update the DTB (bootloop).
+export DTC_FLAGS := -p 1024
+else
 export DTC_FLAGS := -@
+endif
 endif
 
 all:	$(KBUILD_IMAGE) $(KBUILD_DTBS)
