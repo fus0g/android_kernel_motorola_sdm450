@@ -106,3 +106,24 @@
 /* ---- former overlay content ---- */
 #include "sdm450-ali-common-overlay.dtsi"
 #include <dt-bindings/clock/msm-clocks-8953.h>
+
+/*
+ * The 3.18 Motorola DSI driver only used the short-read path for 0-byte
+ * reads; every 1-byte register read (e.g. the ESD status read of reg 0x0A)
+ * went through set-max-return-size + long response. The 4.9 driver assumes a
+ * short response for reads of <= 2 bytes unless the panel says otherwise. These
+ * panels answer with a long response, so the read failed ("Invalid response
+ * cmd"), the ESD check reported PANEL_ALIVE=0 every ~8.5s and Android's HWC
+ * power-cycled the display (visible flicker).
+ */
+&mot_boe_565_1080p_vid_v0 {
+	qcom,mdss-dsi-panel-reply-long-response;
+};
+
+&mot_tianma_565_1080p_vid_v0 {
+	qcom,mdss-dsi-panel-reply-long-response;
+};
+
+&mot_auo_565_1080p_vid_v0 {
+	qcom,mdss-dsi-panel-reply-long-response;
+};
