@@ -83,3 +83,7 @@ ifeq ($(CONFIG_GINNA_DTB), y)
 snd_smartpa_aw882xx-objs = aw882xx.o
 obj-y += snd_smartpa_aw882xx.o
 endif
+
+# ali (CONFIG_ALI_DTB) has no board-specific codec objects here; keep kbuild
+# generating an (empty) built-in.o so sound/soc can link.
+obj- += ali_placeholder.o
