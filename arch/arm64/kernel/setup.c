@@ -30,6 +30,7 @@
 #include <linux/bootmem.h>
 #include <linux/screen_info.h>
 #include <linux/init.h>
+#include <linux/ali_dbgfb.h>
 #include <linux/kexec.h>
 #include <linux/crash_dump.h>
 #include <linux/root_dev.h>
@@ -265,8 +266,10 @@ void __init setup_arch(char **cmdline_p)
 
 	early_fixmap_init();
 	early_ioremap_init();
+	ali_dbgfb_early(1);
 
 	setup_machine_fdt(__fdt_pointer);
+	ali_dbgfb_early(2);
 
 	parse_early_param();
 
@@ -287,6 +290,7 @@ void __init setup_arch(char **cmdline_p)
 	arm64_memblock_init();
 
 	paging_init();
+	ali_dbgfb_early(3);
 
 	acpi_table_upgrade();
 

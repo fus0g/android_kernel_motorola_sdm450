@@ -219,6 +219,23 @@ efi_header_end:
 	 *  x19/x20    __primary_switch()         callee preserved temp registers
 	 */
 ENTRY(stext)
+#ifdef CONFIG_ALI_DBGFB
+	/* ali bring-up: stage 0 = kernel entered. MMU off, x0-x3 preserved. */
+	movz	x9, #0x9000, lsl #16
+	add	x9, x9, #0x1000			// splash fb phys 0x90001000
+	movn	x10, #0				// all ones
+	mov	x11, #8100			// 40 lines * 3240 B / 16
+1:	stp	x10, x10, [x9], #16
+	subs	x11, x11, #1
+	b.ne	1b
+	movz	x12, #0x249, lsl #16
+	movk	x12, #0xf000			// ~2s @ 19.2MHz
+	mrs	x13, cntvct_el0
+2:	mrs	x14, cntvct_el0
+	sub	x14, x14, x13
+	cmp	x14, x12
+	b.lo	2b
+#endif
 	bl	preserve_boot_args
 	bl	el2_setup			// Drop to EL1, w0=cpu_boot_mode
 	adrp	x23, __PHYS_OFFSET

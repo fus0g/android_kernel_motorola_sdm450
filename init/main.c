@@ -13,6 +13,7 @@
 
 #include <linux/types.h>
 #include <linux/module.h>
+#include <linux/ali_dbgfb.h>
 #include <linux/proc_fs.h>
 #include <linux/kernel.h>
 #include <linux/syscalls.h>
@@ -536,6 +537,7 @@ asmlinkage __visible void __init start_kernel(void)
 	sort_main_extable();
 	trap_init();
 	mm_init();
+	ali_dbgfb(4);
 
 	/*
 	 * Set up the scheduler prior starting any interrupts (such as the
@@ -577,6 +579,7 @@ asmlinkage __visible void __init start_kernel(void)
 	softirq_init();
 	timekeeping_init();
 	time_init();
+	ali_dbgfb(5);
 	sched_clock_postinit();
 	printk_nmi_init();
 	perf_event_init();
@@ -594,6 +597,7 @@ asmlinkage __visible void __init start_kernel(void)
 	 * this. But we do want output early, in case something goes wrong.
 	 */
 	console_init();
+	ali_dbgfb(6);
 	if (panic_later)
 		panic("Too many boot %s vars at `%s'", panic_later,
 		      panic_param);
@@ -667,6 +671,7 @@ asmlinkage __visible void __init start_kernel(void)
 	ftrace_init();
 
 	/* Do the rest non-__init'ed, we're now alive */
+	ali_dbgfb(7);
 	rest_init();
 }
 
@@ -841,6 +846,7 @@ static void __init do_initcall_level(int level)
 {
 	initcall_t *fn;
 
+	ali_dbgfb(11 + level);
 	strcpy(initcall_command_line, saved_command_line);
 	parse_args(initcall_level_names[level],
 		   initcall_command_line, __start___param,
@@ -959,6 +965,7 @@ static int __ref kernel_init(void *unused)
 
 	rcu_end_inkernel_boot();
 
+	ali_dbgfb(20);
 	if (ramdisk_execute_command) {
 		ret = run_init_process(ramdisk_execute_command);
 		if (!ret)
@@ -1018,12 +1025,16 @@ static noinline void __init kernel_init_freeable(void)
 	do_pre_smp_initcalls();
 	lockup_detector_init();
 
+	ali_dbgfb(8);
 	smp_init();
+	ali_dbgfb(9);
 	sched_init_smp();
+	ali_dbgfb(10);
 
 	page_alloc_init_late();
 
 	do_basic_setup();
+	ali_dbgfb(19);
 
 	/* Open the /dev/console on the rootfs, this should never fail */
 	if (sys_open((const char __user *) "/dev/console", O_RDWR, 0) < 0)
