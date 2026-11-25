@@ -197,7 +197,10 @@ CDEFINES +=	-DANI_LITTLE_BYTE_ENDIAN \
 		-Werror\
 		-D__linux__
 
-ifeq ($(CONFIG_RIVER_DTB), y)
+# ali uses the same CS47L35 (Madera) codec as river: the machine driver must
+# take its Madera path (the codec assigns SLIMbus channels itself) instead of
+# asking the codec DAI for a channel map, which fails with -EINVAL.
+ifneq ($(filter y,$(CONFIG_RIVER_DTB) $(CONFIG_ALI_DTB)),)
 CDEFINES += -DCONFIG_SND_SOC_MADERA -DCONFIG_MFD_CS47L35
 endif
 
