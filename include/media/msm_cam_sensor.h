@@ -26,21 +26,6 @@ struct msm_sensor_power_setting_array32 {
 	uint16_t size_down;
 };
 
-struct msm_camera_i2c_reg_setting32 {
-	compat_uptr_t reg_setting;
-	uint16_t size;
-	enum msm_camera_i2c_reg_addr_type addr_type;
-	enum msm_camera_i2c_data_type data_type;
-	uint16_t delay;
-};
-
-struct msm_sensor_id_info_t32 {
-	unsigned short sensor_id_reg_addr;
-	unsigned short sensor_id;
-	unsigned short sensor_id_mask;
-	struct msm_camera_i2c_reg_setting32 setting;
-};
-
 struct msm_camera_sensor_slave_info32 {
 	char sensor_name[32];
 	char eeprom_name[32];
@@ -52,7 +37,7 @@ struct msm_camera_sensor_slave_info32 {
 	uint16_t slave_addr2;
 	enum i2c_freq_mode_t i2c_freq_mode;
 	enum msm_camera_i2c_reg_addr_type addr_type;
-	struct msm_sensor_id_info_t32 sensor_id_info;
+	struct msm_sensor_id_info_t sensor_id_info;
 	struct msm_sensor_power_setting_array32 power_setting_array;
 	uint8_t  is_init_params_valid;
 	struct msm_sensor_init_params sensor_init_params;
@@ -100,15 +85,6 @@ struct msm_ir_cut_cfg_data_t32 {
 	enum msm_ir_cut_cfg_type_t cfg_type;
 };
 
-struct msm_laser_led_cfg_data_t32 {
-	enum msm_laser_led_cfg_type_t cfg_type;
-	compat_uptr_t                 setting;
-	compat_uptr_t                 debug_reg;
-	uint32_t                      debug_reg_size;
-	uint16_t                      i2c_addr;
-	enum i2c_freq_mode_t          i2c_freq_mode;
-};
-
 struct eeprom_read_t32 {
 	compat_uptr_t dbuffer;
 	uint32_t num_bytes;
@@ -118,6 +94,24 @@ struct eeprom_write_t32 {
 	compat_uptr_t dbuffer;
 	uint32_t num_bytes;
 };
+
+#if defined(MULTI_CAMERA_DEEN) || defined(VENDOR_CAMERA_DEEN)
+struct bst_eeprom_read_t32 {
+uint32_t offset_addr;
+compat_uptr_t dbuffer;
+uint32_t num_bytes;
+};
+struct bst_eeprom_write_t32 {
+uint32_t offset_addr;
+compat_uptr_t dbuffer;
+uint32_t num_bytes;
+};
+struct eeprom_get_cmm_t32 {
+	uint32_t cmm_support;
+	uint32_t cmm_compression;
+	uint32_t cmm_size;
+};
+#endif
 
 struct msm_eeprom_info_t32 {
 	compat_uptr_t power_setting_array;
@@ -134,6 +128,11 @@ struct msm_eeprom_cfg_data32 {
 		struct eeprom_read_t32 read_data;
 		struct eeprom_write_t32 write_data;
 		struct msm_eeprom_info_t32 eeprom_info;
+#if defined(MULTI_CAMERA_DEEN) || defined(VENDOR_CAMERA_DEEN)
+		struct eeprom_get_cmm_t32 get_cmm_data;
+		struct bst_eeprom_read_t32 bst_read_data;
+		struct bst_eeprom_write_t32 bst_write_data;
+#endif
 	} cfg;
 };
 
@@ -144,9 +143,22 @@ struct msm_camera_i2c_seq_reg_setting32 {
 	uint16_t delay;
 };
 
+struct msm_camera_i2c_reg_setting32 {
+	compat_uptr_t reg_setting;
+	uint16_t size;
+	enum msm_camera_i2c_reg_addr_type addr_type;
+	enum msm_camera_i2c_data_type data_type;
+	uint16_t delay;
+};
+
 struct msm_camera_i2c_array_write_config32 {
 	struct msm_camera_i2c_reg_setting32 conf_array;
 	uint16_t slave_addr;
+};
+
+struct msm_mot_actuator_tuning_params_t32 {
+	int16_t infinity_dac;
+	int16_t macro_dac;
 };
 
 struct msm_actuator_tuning_params_t32 {
@@ -175,6 +187,7 @@ struct msm_actuator_params_t32 {
 struct msm_actuator_set_info_t32 {
 	struct msm_actuator_params_t32 actuator_params;
 	struct msm_actuator_tuning_params_t32 af_tuning_params;
+	struct msm_mot_actuator_tuning_params_t32 mot_af_tuning_params;
 };
 
 struct sensor_init_cfg_data32 {
@@ -260,6 +273,8 @@ struct msm_flash_cfg_data_t32 {
 	enum msm_flash_cfg_type_t cfg_type;
 	int32_t flash_current[MAX_LED_TRIGGERS];
 	int32_t flash_duration[MAX_LED_TRIGGERS];
+	enum flash_position position;
+	enum mux_sel_option mux_sel;
 	union {
 		compat_uptr_t flash_init_info;
 		compat_uptr_t settings;
@@ -295,10 +310,7 @@ struct msm_flash_cfg_data_t32 {
 
 #define VIDIOC_MSM_IR_CUT_CFG32 \
 	_IOWR('V', BASE_VIDIOC_PRIVATE + 15, struct msm_ir_cut_cfg_data_t32)
-
-#define VIDIOC_MSM_LASER_LED_CFG32 \
-	_IOWR('V', BASE_VIDIOC_PRIVATE + 16, struct msm_laser_led_cfg_data_t32)
-
 #endif
 
 #endif
+

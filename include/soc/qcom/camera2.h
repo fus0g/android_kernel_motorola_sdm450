@@ -47,7 +47,9 @@ struct msm_camera_slave_info {
 	uint16_t sensor_id_reg_addr;
 	uint16_t sensor_id;
 	uint16_t sensor_id_mask;
-	struct msm_camera_i2c_reg_setting *setting;
+	uint16_t sensor_id2;
+	uint16_t sensor_model_id_reg_addr;
+	uint16_t sensor_model_id;
 };
 
 struct msm_cam_clk_info {
@@ -94,6 +96,8 @@ struct msm_camera_gpio_conf {
 	uint32_t *camera_on_table;
 	uint8_t camera_on_table_size;
 	struct msm_camera_gpio_num_info *gpio_num_info;
+	struct msm_gpio_set_tbl *cam_gpio_set_tbl;
+	uint8_t cam_gpio_set_tbl_size;
 };
 
 struct msm_camera_power_ctrl_t {

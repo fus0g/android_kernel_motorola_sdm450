@@ -1,4 +1,4 @@
-/* Copyright (c) 2009-2016, 2019, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2009-2016, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -45,9 +45,10 @@ struct msm_flash_func_t {
 		struct msm_flash_cfg_data_t *);
 	int32_t (*camera_flash_high)(struct msm_flash_ctrl_t *,
 		struct msm_flash_cfg_data_t *);
-	int32_t (*camera_flash_query_current)(struct msm_flash_ctrl_t *,
-		struct msm_flash_query_data_t *);
-
+	int32_t (*camera_flash_read)(struct msm_flash_ctrl_t *,
+		struct msm_flash_cfg_data_t *);
+	int32_t (*camera_flash_write)(struct msm_flash_ctrl_t *,
+		struct msm_flash_cfg_data_t *);
 };
 
 struct msm_flash_table {
@@ -73,7 +74,6 @@ struct msm_flash_ctrl_t {
 	/* Switch node to trigger led */
 	const char *switch_trigger_name;
 	struct led_trigger *switch_trigger;
-	uint32_t is_regulator_enabled;
 
 	/* Flash */
 	uint32_t flash_num_sources;
@@ -82,6 +82,10 @@ struct msm_flash_ctrl_t {
 	uint32_t flash_op_current[MAX_LED_TRIGGERS];
 	uint32_t flash_max_current[MAX_LED_TRIGGERS];
 	uint32_t flash_max_duration[MAX_LED_TRIGGERS];
+	/* Alternate flash parameters used for MUXing 2 LEDs to 1 controller */
+	uint32_t flash_alt_op_current[MAX_LED_TRIGGERS];
+	uint32_t flash_alt_max_current[MAX_LED_TRIGGERS];
+	uint32_t flash_alt_max_duration[MAX_LED_TRIGGERS];
 
 	/* Torch */
 	uint32_t torch_num_sources;
@@ -89,6 +93,9 @@ struct msm_flash_ctrl_t {
 	struct led_trigger *torch_trigger[MAX_LED_TRIGGERS];
 	uint32_t torch_op_current[MAX_LED_TRIGGERS];
 	uint32_t torch_max_current[MAX_LED_TRIGGERS];
+	/* Alternate torch parameters used for MUXing 2 LEDs to 1 controller */
+	uint32_t torch_alt_op_current[MAX_LED_TRIGGERS];
+	uint32_t torch_alt_max_current[MAX_LED_TRIGGERS];
 
 	void *data;
 	enum msm_camera_device_type_t flash_device_type;
@@ -102,8 +109,6 @@ struct msm_flash_ctrl_t {
 
 	/* flash state */
 	enum msm_camera_flash_state_t flash_state;
-	int32_t (*platform_flash_init)(struct msm_flash_ctrl_t *flash_ctrl,
-		struct msm_flash_cfg_data_t *flash_data);
 };
 
 int msm_flash_i2c_probe(struct i2c_client *client,
@@ -126,6 +131,4 @@ int msm_flash_led_release(struct msm_flash_ctrl_t *fctrl);
 int msm_flash_led_off(struct msm_flash_ctrl_t *fctrl);
 int msm_flash_led_low(struct msm_flash_ctrl_t *fctrl);
 int msm_flash_led_high(struct msm_flash_ctrl_t *fctrl);
-int32_t camera_flash_platform_probe(struct platform_device *pdev);
-
 #endif

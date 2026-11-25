@@ -129,11 +129,17 @@ static u32 msm_legacy_group_id(u32 idx)
 	}
 }
 
+static bool msm_legacy_model(struct media_device *mdev)
+{
+	return !strcmp(mdev->model, MSM_CONFIGURATION_NAME) ||
+	       !strcmp(mdev->model, MSM_CAMERA_NAME);
+}
+
 static void msm_legacy_entity_abi(struct media_device *mdev,
 				  struct media_entity *ent,
 				  struct media_entity_desc *entd)
 {
-	if (strcmp(mdev->model, MSM_CONFIGURATION_NAME))
+	if (!msm_legacy_model(mdev))
 		return;
 
 	if (ent->function == QCAMERA_VNODE_GROUP_ID) {
@@ -159,7 +165,7 @@ static long media_device_enum_entities(struct media_device *mdev, void *arg)
 	 * 1,2,3,... until EINVAL. Here ids are sparse (interfaces share the id
 	 * space), so treat a plain id on msm_config as a 1-based ordinal.
 	 */
-	if (!strcmp(mdev->model, MSM_CONFIGURATION_NAME) &&
+	if (msm_legacy_model(mdev) &&
 	    !(entd->id & MEDIA_ENT_ID_FLAG_NEXT)) {
 		u32 n = entd->id;
 		struct media_entity *e;
