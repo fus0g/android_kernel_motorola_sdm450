@@ -694,7 +694,6 @@ CONFIG_CRYPTO_CRC32_ARM64=y
 CONFIG_QMI_ENCDEC=y
 CONFIG_BUILD_ARM64_APPENDED_DTB_IMAGE_NAMES="qcom/sdm450-ali-p0a qcom/sdm450-ali-evt2 qcom/sdm450-ali-dvt1a qcom/sdm450-ali-dvt1b qcom/sdm450-ali-dvt2 qcom/sdm450-ali-pvt1 qcom/sdm450-ali-pvt2"
 # ---- early-boot bring-up: keep the boot path as plain as possible ----
-# CONFIG_RANDOMIZE_BASE is not set
 # Wi-Fi: Pronto/prima driver built in, same options as the 3.18 ali kernel
 CONFIG_PRONTO_WLAN=y
 CONFIG_PRIMA_WLAN_LFR=y
