@@ -717,3 +717,6 @@ CONFIG_MADERA_IRQ=y
 CONFIG_GPIO_MADERA=y
 CONFIG_REGULATOR_MADERA_LDO1=y
 CONFIG_REGULATOR_MADERA_MICSUPP=y
+
+# Many DT reserved-memory CMA pools (venus, adsp, gpu, qseecom, ...): default 7 slots is too few
+CONFIG_CMA_AREAS=32
