@@ -84,6 +84,18 @@ snd_smartpa_aw882xx-objs = aw882xx.o
 obj-y += snd_smartpa_aw882xx.o
 endif
 
-# ali (CONFIG_ALI_DTB) has no board-specific codec objects here; keep kbuild
-# generating an (empty) built-in.o so sound/soc can link.
-obj- += ali_placeholder.o
+# ali: CS47L35 (Madera) codec + CS35L35 speaker amp, the same Cirrus design as
+# river but without the other amps and the AOV trigger.
+ifeq ($(CONFIG_ALI_DTB), y)
+cirrus_madera-objs = madera.o madera-slimbus.o
+obj-y += cirrus_madera.o
+
+cirrus_wm_adsp-objs = wm_adsp.o
+obj-y += cirrus_wm_adsp.o
+
+cirrus_cs35l35-objs = cs35l35.o
+obj-y += cirrus_cs35l35.o
+
+cirrus_cs47l35-objs = cs47l35.o
+obj-y += cirrus_cs47l35.o
+endif
