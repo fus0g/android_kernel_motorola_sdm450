@@ -37,6 +37,10 @@
 #include <media/media-devnode.h>
 #include <media/media-entity.h>
 
+#if IS_ENABLED(CONFIG_MSMB_CAMERA)
+#include <media/msmb_camera.h>
+#endif
+
 #ifdef CONFIG_MEDIA_CONTROLLER
 
 /* -----------------------------------------------------------------------------
@@ -98,11 +102,79 @@ static struct media_entity *find_entity(struct media_device *mdev, u32 id)
 	return NULL;
 }
 
+#if IS_ENABLED(CONFIG_MSMB_CAMERA)
+/*
+ * The Qualcomm camera userspace shipped with the 3.18 kernel (mm-qcamera-daemon
+ * and the camera HAL blobs) identifies the camera sub-devices by the old small
+ * entity.group_id constants (CSIPHY=0, CSID=1, ..., SENSOR_INIT=14) and expects
+ * type MEDIA_ENT_T_V4L2_SUBDEV for sub-devices and MEDIA_ENT_T_DEVNODE_V4L for
+ * the video node, with group_id QCAMERA_VNODE_GROUP_ID=2.
+ *
+ * This kernel keeps the group in entity.function with renumbered values
+ * (MSM_CAMERA_SUBDEV_BASE + n, CSID/BUF_MNGR/EXT/TOF/CCI_INTF changed) and
+ * reports group_id as 0. Translate back for the msm_config media device only,
+ * otherwise the daemon finds no camera hardware and exits.
+ */
+#define MSM_LEGACY_VNODE_GROUP_ID	2
+
+static u32 msm_legacy_group_id(u32 idx)
+{
+	switch (idx) {
+	case 13: return 1;	/* CSID */
+	case 1:  return 13;	/* BUF_MNGR */
+	case 19: return 20;	/* EXT */
+	case 20: return 19;	/* TOF */
+	case 22: return 20;	/* CCI_INTF */
+	default: return idx;
+	}
+}
+
+static void msm_legacy_entity_abi(struct media_device *mdev,
+				  struct media_entity *ent,
+				  struct media_entity_desc *entd)
+{
+	if (strcmp(mdev->model, MSM_CONFIGURATION_NAME))
+		return;
+
+	if (ent->function == QCAMERA_VNODE_GROUP_ID) {
+		entd->type = MEDIA_ENT_F_IO_V4L;
+		entd->group_id = MSM_LEGACY_VNODE_GROUP_ID;
+	} else if (ent->function >= MSM_CAMERA_SUBDEV_BASE &&
+		   ent->function < MSM_CAMERA_SUBDEV_BASE + 0x100) {
+		entd->type = MEDIA_ENT_F_V4L2_SUBDEV_UNKNOWN;
+		entd->group_id = msm_legacy_group_id(ent->function -
+						     MSM_CAMERA_SUBDEV_BASE);
+	}
+}
+#endif
+
 static long media_device_enum_entities(struct media_device *mdev, void *arg)
 {
 	struct media_entity_desc *entd = arg;
 	struct media_entity *ent;
 
+#if IS_ENABLED(CONFIG_MSMB_CAMERA)
+	/*
+	 * Legacy msm camera userspace walks entities with sequential ids
+	 * 1,2,3,... until EINVAL. Here ids are sparse (interfaces share the id
+	 * space), so treat a plain id on msm_config as a 1-based ordinal.
+	 */
+	if (!strcmp(mdev->model, MSM_CONFIGURATION_NAME) &&
+	    !(entd->id & MEDIA_ENT_ID_FLAG_NEXT)) {
+		u32 n = entd->id;
+		struct media_entity *e;
+
+		ent = NULL;
+		if (n) {
+			media_device_for_each_entity(e, mdev) {
+				if (--n == 0) {
+					ent = e;
+					break;
+				}
+			}
+		}
+	} else
+#endif
 	ent = find_entity(mdev, entd->id);
 	if (ent == NULL)
 		return -EINVAL;
@@ -137,6 +209,10 @@ static long media_device_enum_entities(struct media_device *mdev, void *arg)
 		else if (ent->function != MEDIA_ENT_F_IO_V4L)
 			entd->type = MEDIA_ENT_T_DEVNODE_UNKNOWN;
 	}
+
+#if IS_ENABLED(CONFIG_MSMB_CAMERA)
+	msm_legacy_entity_abi(mdev, ent, entd);
+#endif
 
 	memcpy(&entd->raw, &ent->info, sizeof(ent->info));
 
