@@ -23,6 +23,7 @@
 #include <linux/err.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
+#include <linux/sysfs.h>
 #include <linux/sys_soc.h>
 #include <linux/slab.h>
 #include <linux/stat.h>
@@ -2042,3 +2043,24 @@ int __init socinfo_init(void)
 	return 0;
 }
 subsys_initcall(socinfo_init);
+
+/*
+ * Vendor blobs and init scripts written for the 3.18 kernel look for the SoC
+ * platform devices under /sys/devices/soc; on 4.9 they live under
+ * /sys/devices/platform/soc. Provide the old path as a symlink.
+ */
+static int __init socinfo_legacy_sysfs_link(void)
+{
+	struct device *soc = bus_find_device_by_name(&platform_bus_type, NULL,
+						     "soc");
+	int rc;
+
+	if (!soc)
+		return 0;
+	rc = sysfs_create_link(platform_bus.kobj.parent, &soc->kobj, "soc");
+	if (rc)
+		pr_warn("socinfo: cannot create /sys/devices/soc link: %d\n", rc);
+	put_device(soc);
+	return 0;
+}
+late_initcall(socinfo_legacy_sysfs_link);
