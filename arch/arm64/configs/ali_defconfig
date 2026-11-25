@@ -722,3 +722,11 @@ CONFIG_HOMEBUTTON=y
 # Android VINTF (target-level 2, kernel 4.9) requires these
 CONFIG_NETFILTER_XT_MATCH_QTAGUID=y
 CONFIG_PM_AUTOSLEEP=y
+
+# eBPF traffic accounting / Android 12 groundwork
+CONFIG_BPF_JIT=y
+CONFIG_PSI=y
+CONFIG_UTS_NS=y
+CONFIG_VETH=y
+CONFIG_DM_SNAPSHOT=y
+CONFIG_DEBUG_LIST=y
