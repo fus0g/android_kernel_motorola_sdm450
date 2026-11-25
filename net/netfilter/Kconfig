@@ -1365,6 +1365,18 @@ config NETFILTER_XT_MATCH_PKTTYPE
 
 	  To compile it as a module, choose M here.  If unsure, say N.
 
+config NETFILTER_XT_MATCH_QTAGUID
+	bool "Android VINTF placeholder for the legacy xt_qtaguid match"
+	depends on NETFILTER_XTABLES
+	help
+	  This kernel does NOT contain the legacy xt_qtaguid module. Android 10+
+	  does per-uid traffic accounting with eBPF (CONFIG_CGROUP_BPF,
+	  CONFIG_NETFILTER_XT_MATCH_BPF, ...). The vendor manifest of the ali
+	  device still declares an Android 8.1 target level whose kernel
+	  compatibility matrix lists this symbol as required, so without it the
+	  runtime VINTF check fails and the system shows a "problem with your
+	  device" dialog on every boot. Selecting this adds no code.
+
 config NETFILTER_XT_MATCH_QUOTA
 	tristate '"quota" match support'
 	depends on NETFILTER_ADVANCED

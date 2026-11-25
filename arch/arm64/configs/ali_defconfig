@@ -718,3 +718,7 @@ CONFIG_CMA_AREAS=32
 
 # Moto Actions fingerprint gestures (/sys/homebutton)
 CONFIG_HOMEBUTTON=y
+
+# Android VINTF (target-level 2, kernel 4.9) requires these
+CONFIG_NETFILTER_XT_MATCH_QTAGUID=y
+CONFIG_PM_AUTOSLEEP=y
