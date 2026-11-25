@@ -36,6 +36,7 @@
 #include <media/media-device.h>
 #include <media/media-devnode.h>
 #include <media/media-entity.h>
+#include <media/v4l2-subdev.h>
 
 #if IS_ENABLED(CONFIG_MSMB_CAMERA)
 #include <media/msmb_camera.h>
@@ -150,6 +151,18 @@ static void msm_legacy_entity_abi(struct media_device *mdev,
 		entd->type = MEDIA_ENT_F_V4L2_SUBDEV_UNKNOWN;
 		entd->group_id = msm_legacy_group_id(ent->function -
 						     MSM_CAMERA_SUBDEV_BASE);
+		/*
+		 * The 3.18 msm_cpp/msm_vpe drivers stored their /dev/v4l-subdevN
+		 * number in entity.revision and the daemon opens the device by
+		 * that number; 4.9 no longer has the field, so report it here.
+		 */
+		if (ent->function == MSM_CAMERA_SUBDEV_CPP ||
+		    ent->function == MSM_CAMERA_SUBDEV_VPE) {
+			struct v4l2_subdev *sd = media_entity_to_v4l2_subdev(ent);
+
+			if (sd && sd->devnode)
+				entd->revision = sd->devnode->num;
+		}
 	}
 }
 #endif
