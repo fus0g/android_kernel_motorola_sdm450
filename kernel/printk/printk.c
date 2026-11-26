@@ -2057,6 +2057,15 @@ static int __init console_setup(char *str)
 		return 1;
 
 	/*
+	 * The Motorola bootloader rewrites console=... to console=null. No
+	 * console driver is called "null", so honouring it leaves /dev/console
+	 * without a device (ENODEV) and breaks run-init in the Halium initramfs.
+	 * Ignore it so the default (VT) console is used.
+	 */
+	if (!strncmp(str, "null", 4) && (str[4] == '\0' || str[4] == ','))
+		return 1;
+
+	/*
 	 * Decode str into name, index, options.
 	 */
 	if (str[0] >= '0' && str[0] <= '9') {
