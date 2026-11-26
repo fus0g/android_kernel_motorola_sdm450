@@ -616,6 +616,14 @@ SYSCALL_DEFINE2(pidfd_open, pid_t, pid, unsigned int, flags)
 	struct pid *p;
 	struct task_struct *tsk;
 
+	/*
+	 * Halium: this kernel has neither waitid(P_PIDFD) nor CLONE_PIDFD.
+	 * glib (Ubuntu 24.04) takes the pidfd path when pidfd_open() works and
+	 * then fails in waitid(). Report "not implemented" so userspace falls
+	 * back to SIGCHLD based child watching.
+	 */
+	return -ENOSYS;
+
 	if (flags)
 		return -EINVAL;
 
