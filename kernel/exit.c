@@ -1644,20 +1644,11 @@ SYSCALL_DEFINE5(waitid, int, which, pid_t, upid, struct siginfo __user *,
 		if (upid <= 0)
 			return -EINVAL;
 		break;
-	case P_PIDFD:
-		type = PIDTYPE_PID;
-		if (upid < 0)
-			return -EINVAL;
-
-		pid = pidfd_get_pid(upid);
-		if (IS_ERR(pid))
-			return PTR_ERR(pid);
-		break;
 	default:
 		return -EINVAL;
 	}
 
-	if (type < PIDTYPE_MAX && which != P_PIDFD)
+	if (type < PIDTYPE_MAX)
 		pid = find_get_pid(upid);
 
 	wo.wo_type	= type;

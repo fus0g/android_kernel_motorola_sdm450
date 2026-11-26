@@ -39,7 +39,6 @@
 #include <linux/proc_ns.h>
 #include <linux/proc_fs.h>
 #include <linux/anon_inodes.h>
-#include <linux/file.h>
 
 #define pid_hashfn(nr, ns)	\
 	hash_long((unsigned long)nr + (unsigned long)ns, pidhash_shift)
@@ -567,43 +566,6 @@ struct pid *find_ge_pid(int nr, struct pid_namespace *ns)
 		nr = next_pidmap(ns, nr);
 	} while (nr > 0);
 
-	return pid;
-}
-
-/**
- * pidfd_pid() - Get the pid that a pidfd refers to.
- * @file: pidfd file
- *
- * Return: the struct pid (no reference taken) or ERR_PTR(-EBADF).
- */
-struct pid *pidfd_pid(const struct file *file)
-{
-	if (file->f_op == &pidfd_fops)
-		return file->private_data;
-
-	return ERR_PTR(-EBADF);
-}
-
-/**
- * pidfd_get_pid() - Get a reference on the struct pid for a pidfd.
- * @fd: pidfd
- *
- * Return: the struct pid with a reference held, or an ERR_PTR on error.
- */
-struct pid *pidfd_get_pid(unsigned int fd)
-{
-	struct fd f;
-	struct pid *pid;
-
-	f = fdget(fd);
-	if (!f.file)
-		return ERR_PTR(-EBADF);
-
-	pid = pidfd_pid(f.file);
-	if (!IS_ERR(pid))
-		get_pid(pid);
-
-	fdput(f);
 	return pid;
 }
 
