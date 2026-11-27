@@ -1,4 +1,4 @@
-ccflags-y += -Werror
+ccflags-y += -Werror -Wno-unused-but-set-variable
 
 obj-$(CONFIG_VSERVICES_SERVER) += vservices_protocol_core_server.o
 vservices_protocol_core_server-objs = server.o

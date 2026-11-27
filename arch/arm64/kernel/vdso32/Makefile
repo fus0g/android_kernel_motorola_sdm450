@@ -36,7 +36,8 @@ VDSO_CPPFLAGS += $(KBUILD_CPPFLAGS)
 VDSO_CAFLAGS := $(VDSO_CPPFLAGS)
 VDSO_CAFLAGS += $(call cc32-option,-fno-PIE)
 ifdef CONFIG_DEBUG_INFO
-VDSO_CAFLAGS += -g
+# newer clang defaults to DWARF 5, which the GNU assembler used here cannot parse
+VDSO_CAFLAGS += -g -gdwarf-4
 endif
 ifeq ($(shell $(CONFIG_SHELL) $(srctree)/scripts/gcc-goto.sh $(CC_ARM32)), y)
 VDSO_CAFLAGS += -DCC_HAVE_ASM_GOTO
