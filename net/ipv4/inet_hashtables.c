@@ -232,7 +232,7 @@ struct sock *__inet_lookup_listener(struct net *net,
 				result = reuseport_select_sock(sk, phash,
 							       skb, doff);
 				if (result)
-					return result;
+					goto done;
 				matches = 1;
 			}
 			result = sk;
@@ -244,6 +244,9 @@ struct sock *__inet_lookup_listener(struct net *net,
 			phash = next_pseudo_random32(phash);
 		}
 	}
+done:
+	if (unlikely(IS_ERR(result)))
+		return NULL;
 	return result;
 }
 EXPORT_SYMBOL_GPL(__inet_lookup_listener);
@@ -455,10 +458,11 @@ static int inet_reuseport_add_sock(struct sock *sk,
 		    inet_csk(sk2)->icsk_bind_hash == tb &&
 		    sk2->sk_reuseport && uid_eq(uid, sock_i_uid(sk2)) &&
 		    saddr_same(sk, sk2, false))
-			return reuseport_add_sock(sk, sk2);
+			return reuseport_add_sock(sk, sk2,
+						  inet_rcv_saddr_any(sk));
 	}
 
-	return reuseport_alloc(sk);
+	return reuseport_alloc(sk, inet_rcv_saddr_any(sk));
 }
 
 int __inet_hash(struct sock *sk, struct sock *osk,
@@ -483,12 +487,12 @@ int __inet_hash(struct sock *sk, struct sock *osk,
 		if (err)
 			goto unlock;
 	}
+	sock_set_flag(sk, SOCK_RCU_FREE);
 	if (IS_ENABLED(CONFIG_IPV6) && sk->sk_reuseport &&
 		sk->sk_family == AF_INET6)
 		__sk_nulls_add_node_tail_rcu(sk, &ilb->nulls_head);
 	else
 		__sk_nulls_add_node_rcu(sk, &ilb->nulls_head);
-	sock_set_flag(sk, SOCK_RCU_FREE);
 	sock_prot_inuse_add(sock_net(sk), sk->sk_prot, 1);
 unlock:
 	spin_unlock(&ilb->lock);
@@ -588,8 +592,8 @@ int __inet_hash_connect(struct inet_timewait_death_row *death_row,
 	if (likely(remaining > 1))
 		remaining &= ~1U;
 
-	net_get_random_once(table_perturb,
-			    INET_TABLE_PERTURB_SIZE * sizeof(*table_perturb));
+	get_random_sleepable_once(table_perturb,
+			     INET_TABLE_PERTURB_SIZE * sizeof(*table_perturb));
 	index = port_offset & (INET_TABLE_PERTURB_SIZE - 1);
 
 	offset = READ_ONCE(table_perturb[index]) + (port_offset >> 32);

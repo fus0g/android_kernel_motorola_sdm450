@@ -31,6 +31,15 @@ const char inet_csk_timer_bug_msg[] = "inet_csk BUG: unknown timer value\n";
 EXPORT_SYMBOL(inet_csk_timer_bug_msg);
 #endif
 
+bool inet_rcv_saddr_any(const struct sock *sk)
+{
+#if IS_ENABLED(CONFIG_IPV6)
+	if (sk->sk_family == AF_INET6)
+		return ipv6_addr_any(&sk->sk_v6_rcv_saddr);
+#endif
+	return !sk->sk_rcv_saddr;
+}
+
 void inet_get_local_port_range(struct net *net, int *low, int *high)
 {
 	unsigned int seq;
@@ -348,8 +357,11 @@ struct sock *inet_csk_accept(struct sock *sk, int flags, int *err)
 	req = reqsk_queue_remove(queue, sk);
 	newsk = req->sk;
 
-	if (sk->sk_protocol == IPPROTO_TCP &&
-	    tcp_rsk(req)->tfo_listener) {
+	/* Check tfo_listener only under fastopenq.lock: reqsk_fastopen_remove()
+	 * clears it under the lock and then still uses req, so a lockless
+	 * check could drop the last reference while it does.
+	 */
+	if (sk->sk_protocol == IPPROTO_TCP) {
 		spin_lock_bh(&queue->fastopenq.lock);
 		if (tcp_rsk(req)->tfo_listener) {
 			/* We are still waiting for the final ACK from 3WHS
@@ -749,6 +761,8 @@ void inet_csk_prepare_forced_close(struct sock *sk)
 	sock_put(sk);
 
 	/* The below has to be done to allow calling inet_csk_destroy_sock */
+	if (sk->sk_protocol == IPPROTO_TCP)
+		tcp_clear_sock_ops_cb_flags(sk);
 	sock_set_flag(sk, SOCK_DEAD);
 	percpu_counter_inc(sk->sk_prot->orphan_count);
 	inet_sk(sk)->inet_num = 0;

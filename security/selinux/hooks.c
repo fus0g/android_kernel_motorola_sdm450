@@ -28,7 +28,7 @@
 #include <linux/kernel.h>
 #include <linux/tracehook.h>
 #include <linux/errno.h>
-#include <linux/sched.h>
+#include <linux/sched/signal.h>
 #include <linux/lsm_hooks.h>
 #include <linux/xattr.h>
 #include <linux/capability.h>
@@ -826,6 +826,7 @@ static int selinux_set_mnt_opts(struct super_block *sb,
 	    !strcmp(sb->s_type->name, "tracefs") ||
 	    !strcmp(sb->s_type->name, "sysfs") ||
 	    !strcmp(sb->s_type->name, "bpf") ||
+	    !strcmp(sb->s_type->name, "binder") ||
 	    !strcmp(sb->s_type->name, "pstore"))
 		sbsec->flags |= SE_SBGENFS;
 

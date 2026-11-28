@@ -32,6 +32,7 @@
 #include <linux/swap.h>
 #include <linux/string.h>
 #include <linux/init.h>
+#include <linux/sched/signal.h>
 #include <linux/pagemap.h>
 #include <linux/perf_event.h>
 #include <linux/highmem.h>
@@ -814,6 +815,7 @@ int transfer_args_to_stack(struct linux_binprm *bprm,
 			goto out;
 	}
 
+	bprm->exec += *sp_location - MAX_ARG_PAGES * PAGE_SIZE;
 	*sp_location = sp;
 
 out:
@@ -1829,6 +1831,7 @@ static int do_execveat_common(int fd, struct filename *filename,
 	/* execve succeeded */
 	current->fs->in_exec = 0;
 	current->in_execve = 0;
+	membarrier_execve(current);
 	acct_update_integrals(current);
 	task_numa_free(current, false);
 	free_bprm(bprm);

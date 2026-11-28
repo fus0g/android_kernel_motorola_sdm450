@@ -108,6 +108,7 @@ vti6_tnl_lookup(struct net *net, const struct in6_addr *remote,
 	hash = HASH(&any, local);
 	for_each_vti6_tunnel_rcu(ip6n->tnls_r_l[hash]) {
 		if (ipv6_addr_equal(local, &t->parms.laddr) &&
+		    ipv6_addr_any(&t->parms.raddr) &&
 		    (t->dev->flags & IFF_UP))
 			return t;
 	}
@@ -115,6 +116,7 @@ vti6_tnl_lookup(struct net *net, const struct in6_addr *remote,
 	hash = HASH(remote, &any);
 	for_each_vti6_tunnel_rcu(ip6n->tnls_r_l[hash]) {
 		if (ipv6_addr_equal(remote, &t->parms.raddr) &&
+		    ipv6_addr_any(&t->parms.laddr) &&
 		    (t->dev->flags & IFF_UP))
 			return t;
 	}
@@ -299,7 +301,8 @@ static void vti6_dev_uninit(struct net_device *dev)
 	dev_put(dev);
 }
 
-static int vti6_rcv(struct sk_buff *skb)
+static int vti6_input_proto(struct sk_buff *skb, int nexthdr, __be32 spi,
+			    int encap_type)
 {
 	struct ip6_tnl *t;
 	const struct ipv6hdr *ipv6h = ipv6_hdr(skb);
@@ -326,13 +329,23 @@ static int vti6_rcv(struct sk_buff *skb)
 
 		rcu_read_unlock();
 
-		return xfrm6_rcv_tnl(skb, t);
+		XFRM_TUNNEL_SKB_CB(skb)->tunnel.ip6 = t;
+		XFRM_SPI_SKB_CB(skb)->family = AF_INET6;
+		XFRM_SPI_SKB_CB(skb)->daddroff = offsetof(struct ipv6hdr, daddr);
+		return xfrm_input(skb, nexthdr, spi, encap_type);
 	}
 	rcu_read_unlock();
 	return -EINVAL;
 discard:
 	kfree_skb(skb);
 	return 0;
+}
+
+static int vti6_rcv(struct sk_buff *skb)
+{
+	int nexthdr = skb_network_header(skb)[IP6CB(skb)->nhoff];
+
+	return vti6_input_proto(skb, nexthdr, 0, 0);
 }
 
 static int vti6_rcv_cb(struct sk_buff *skb, int err)
@@ -1088,23 +1101,22 @@ static struct rtnl_link_ops vti6_link_ops __read_mostly = {
 	.get_link_net	= ip6_tnl_get_link_net,
 };
 
-static void __net_exit vti6_destroy_tunnels(struct vti6_net *ip6n)
+static void __net_exit vti6_destroy_tunnels(struct vti6_net *ip6n,
+					    struct list_head *list)
 {
 	int h;
 	struct ip6_tnl *t;
-	LIST_HEAD(list);
 
 	for (h = 0; h < IP6_VTI_HASH_SIZE; h++) {
 		t = rtnl_dereference(ip6n->tnls_r_l[h]);
 		while (t) {
-			unregister_netdevice_queue(t->dev, &list);
+			unregister_netdevice_queue(t->dev, list);
 			t = rtnl_dereference(t->next);
 		}
 	}
 
 	t = rtnl_dereference(ip6n->tnls_wc[0]);
-	unregister_netdevice_queue(t->dev, &list);
-	unregister_netdevice_many(&list);
+	unregister_netdevice_queue(t->dev, list);
 }
 
 static int __net_init vti6_init_net(struct net *net)
@@ -1124,6 +1136,7 @@ static int __net_init vti6_init_net(struct net *net)
 		goto err_alloc_dev;
 	dev_net_set(ip6n->fb_tnl_dev, net);
 	ip6n->fb_tnl_dev->rtnl_link_ops = &vti6_link_ops;
+	ip6n->fb_tnl_dev->features |= NETIF_F_NETNS_LOCAL;
 
 	err = vti6_fb_tnl_dev_init(ip6n->fb_tnl_dev);
 	if (err < 0)
@@ -1144,24 +1157,31 @@ err_alloc_dev:
 	return err;
 }
 
-static void __net_exit vti6_exit_net(struct net *net)
+static void __net_exit vti6_exit_batch_net(struct list_head *net_list)
 {
-	struct vti6_net *ip6n = net_generic(net, vti6_net_id);
+	struct vti6_net *ip6n;
+	struct net *net;
+	LIST_HEAD(list);
 
 	rtnl_lock();
-	vti6_destroy_tunnels(ip6n);
+	list_for_each_entry(net, net_list, exit_list) {
+		ip6n = net_generic(net, vti6_net_id);
+		vti6_destroy_tunnels(ip6n, &list);
+	}
+	unregister_netdevice_many(&list);
 	rtnl_unlock();
 }
 
 static struct pernet_operations vti6_net_ops = {
 	.init = vti6_init_net,
-	.exit = vti6_exit_net,
+	.exit_batch = vti6_exit_batch_net,
 	.id   = &vti6_net_id,
 	.size = sizeof(struct vti6_net),
 };
 
 static struct xfrm6_protocol vti_esp6_protocol __read_mostly = {
 	.handler	=	vti6_rcv,
+	.input_handler	=	vti6_input_proto,
 	.cb_handler	=	vti6_rcv_cb,
 	.err_handler	=	vti6_err,
 	.priority	=	100,
@@ -1169,6 +1189,7 @@ static struct xfrm6_protocol vti_esp6_protocol __read_mostly = {
 
 static struct xfrm6_protocol vti_ah6_protocol __read_mostly = {
 	.handler	=	vti6_rcv,
+	.input_handler	=	vti6_input_proto,
 	.cb_handler	=	vti6_rcv_cb,
 	.err_handler	=	vti6_err,
 	.priority	=	100,
@@ -1176,6 +1197,7 @@ static struct xfrm6_protocol vti_ah6_protocol __read_mostly = {
 
 static struct xfrm6_protocol vti_ipcomp6_protocol __read_mostly = {
 	.handler	=	vti6_rcv,
+	.input_handler	=	vti6_input_proto,
 	.cb_handler	=	vti6_rcv_cb,
 	.err_handler	=	vti6_err,
 	.priority	=	100,

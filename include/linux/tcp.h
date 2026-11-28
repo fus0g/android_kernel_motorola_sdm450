@@ -177,12 +177,18 @@ struct tcp_sock {
 	u32	data_segs_out;	/* RFC4898 tcpEStatsPerfDataSegsOut
 				 * total number of data segments sent.
 				 */
+	u64	bytes_sent;	/* RFC4898 tcpEStatsPerfHCDataOctetsOut
+				 * total number of data bytes sent.
+				 */
 	u64	bytes_acked;	/* RFC4898 tcpEStatsAppHCThruOctetsAcked
 				 * sum(delta(snd_una)), or how many bytes
 				 * were acked.
 				 */
 	struct u64_stats_sync syncp; /* protects 64bit vars (cf tcp_get_info()) */
 
+	u32	dsack_dups;	/* RFC4898 tcpEStatsStackDSACKDups
+				 * total number of DSACK blocks received
+				 */
  	u32	snd_una;	/* First byte we want an ack for	*/
  	u32	snd_sml;	/* Last byte of the most recently transmitted small packet */
 	u32	rcv_tstamp;	/* timestamp of last received ACK (for keepalives) */
@@ -234,6 +240,7 @@ struct tcp_sock {
 		syn_data:1,	/* SYN includes data */
 		syn_fastopen:1,	/* SYN includes Fast Open option */
 		syn_fastopen_exp:1,/* SYN includes Fast Open exp. option */
+		syn_fastopen_ch:1, /* Active TFO re-enabling probe */
 		syn_data_acked:1,/* data in SYN is acked by SYN-ACK */
 		save_syn:1,	/* Save headers of SYN packet */
 		is_cwnd_limited:1;/* forward progress limited by snd_cwnd? */
@@ -277,6 +284,7 @@ struct tcp_sock {
 				 * receiver in Recovery. */
 	u32	prr_out;	/* Total number of pkts sent during Recovery. */
 	u32	delivered;	/* Total data packets delivered incl. rexmits */
+	u32	delivered_ce;	/* Like the above but only ECE marked packets */
 	u32	lost;		/* Total data packets lost incl. rexmits */
 	u32	app_limited;	/* limited until "delivered" reaches this val */
 	struct skb_mstamp first_tx_mstamp;  /* start of window send phase */
@@ -323,6 +331,9 @@ struct tcp_sock {
 				 * the first SYN. */
 	u32	undo_marker;	/* snd_una upon a new recovery episode. */
 	int	undo_retrans;	/* number of undoable retransmissions. */
+	u64	bytes_retrans;	/* RFC4898 tcpEStatsPerfOctetsRetrans
+				 * Total data bytes retransmitted
+				 */
 	u32	total_retrans;	/* Total retransmits for entire connection */
 
 	u32	urg_seq;	/* Seq of received urgent pointer */
@@ -330,6 +341,17 @@ struct tcp_sock {
 	unsigned int		keepalive_intvl;  /* time interval between keep alive probes */
 
 	int			linger2;
+
+
+/* Sock_ops bpf program related variables */
+#ifdef CONFIG_BPF
+	u8	bpf_sock_ops_cb_flags;  /* Control calling BPF programs
+					 * values defined in uapi/linux/tcp.h
+					 */
+#define BPF_SOCK_OPS_TEST_FLAG(TP, ARG) (TP->bpf_sock_ops_cb_flags & ARG)
+#else
+#define BPF_SOCK_OPS_TEST_FLAG(TP, ARG) 0
+#endif
 
 /* Receiver side RTT estimation */
 	struct {
@@ -420,7 +442,7 @@ static inline void fastopen_queue_tune(struct sock *sk, int backlog)
 	struct request_sock_queue *queue = &inet_csk(sk)->icsk_accept_queue;
 	int somaxconn = READ_ONCE(sock_net(sk)->core.sysctl_somaxconn);
 
-	queue->fastopenq.max_qlen = min_t(unsigned int, backlog, somaxconn);
+	WRITE_ONCE(queue->fastopenq.max_qlen, min_t(unsigned int, backlog, somaxconn));
 }
 
 static inline void tcp_move_syn(struct tcp_sock *tp,

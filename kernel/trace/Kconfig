@@ -505,6 +505,14 @@ config UPROBE_EVENT
 	  This option is required if you plan to use perf-probe subcommand
 	  of perf tools on user space applications.
 
+# Upstream renamed these to KPROBE_EVENTS/UPROBE_EVENTS in 4.11; backported
+# code (perf kprobe/uprobe PMUs, bpf_task_fd_query) tests the new names.
+config KPROBE_EVENTS
+	def_bool KPROBE_EVENT
+
+config UPROBE_EVENTS
+	def_bool UPROBE_EVENT
+
 config BPF_EVENTS
 	depends on BPF_SYSCALL
 	depends on (KPROBE_EVENT || UPROBE_EVENT) && PERF_EVENTS
@@ -570,6 +578,17 @@ config CPU_FREQ_SWITCH_PROFILER
 	  switches that have occurred and duration statistics.
 
 	  If in doubt, say N.
+
+config BPF_KPROBE_OVERRIDE
+	bool "Enable BPF programs to override a kprobed function"
+	depends on BPF_EVENTS
+	depends on KPROBES_ON_FTRACE
+	depends on FUNCTION_ERROR_INJECTION
+	depends on DYNAMIC_FTRACE_WITH_REGS
+	default n
+	help
+	 Allows BPF to override the execution of a probed function and
+	 set a different return value.  This is used for error injection.
 
 config FTRACE_MCOUNT_RECORD
 	def_bool y

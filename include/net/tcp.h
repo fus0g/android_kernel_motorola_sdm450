@@ -45,6 +45,7 @@
 
 #include <linux/seq_file.h>
 #include <linux/memcontrol.h>
+#include <linux/bpf-cgroup.h>
 
 extern struct inet_hashinfo tcp_hashinfo;
 
@@ -430,6 +431,7 @@ void tcp_fetch_timewait_stamp(struct sock *sk, struct dst_entry *dst);
 void tcp_disable_fack(struct tcp_sock *tp);
 void tcp_close(struct sock *sk, long timeout);
 void tcp_init_sock(struct sock *sk);
+void tcp_init_transfer(struct sock *sk, int bpf_op);
 unsigned int tcp_poll(struct file *file, struct socket *sock,
 		      struct poll_table_struct *wait);
 int tcp_getsockopt(struct sock *sk, int level, int optname,
@@ -811,11 +813,35 @@ struct tcp_skb_cb {
 			struct inet6_skb_parm	h6;
 #endif
 		} header;	/* For incoming skbs */
+		struct {
+			__u32 flags;
+			struct sock *sk_redir;
+			void *data_end;
+		} bpf;
 	};
 };
 
 #define TCP_SKB_CB(__skb)	((struct tcp_skb_cb *)&((__skb)->cb[0]))
 
+static inline void bpf_compute_data_end_sk_skb(struct sk_buff *skb)
+{
+	TCP_SKB_CB(skb)->bpf.data_end = skb->data + skb_headlen(skb);
+}
+
+static inline bool tcp_skb_bpf_ingress(const struct sk_buff *skb)
+{
+	return TCP_SKB_CB(skb)->bpf.flags & BPF_F_INGRESS;
+}
+
+static inline struct sock *tcp_skb_bpf_redirect_fetch(struct sk_buff *skb)
+{
+	return TCP_SKB_CB(skb)->bpf.sk_redir;
+}
+
+static inline void tcp_skb_bpf_redirect_clear(struct sk_buff *skb)
+{
+	TCP_SKB_CB(skb)->bpf.sk_redir = NULL;
+}
 
 #if IS_ENABLED(CONFIG_IPV6)
 /* This is the variant of inet6_iif() that must be used by TCP,
@@ -975,12 +1001,13 @@ void tcp_unregister_congestion_control(struct tcp_congestion_ops *type);
 void tcp_assign_congestion_control(struct sock *sk);
 void tcp_init_congestion_control(struct sock *sk);
 void tcp_cleanup_congestion_control(struct sock *sk);
-int tcp_set_default_congestion_control(const char *name);
-void tcp_get_default_congestion_control(char *name);
+int tcp_set_default_congestion_control(struct net *net, const char *name);
+void tcp_get_default_congestion_control(struct net *net, char *name);
 void tcp_get_available_congestion_control(char *buf, size_t len);
 void tcp_get_allowed_congestion_control(char *buf, size_t len);
 int tcp_set_allowed_congestion_control(char *allowed);
-int tcp_set_congestion_control(struct sock *sk, const char *name);
+int tcp_set_congestion_control(struct sock *sk, const char *name, bool load,
+			       bool reinit, bool cap_net_admin);
 u32 tcp_slow_start(struct tcp_sock *tp, u32 acked);
 void tcp_cong_avoid_ai(struct tcp_sock *tp, u32 w, u32 acked);
 
@@ -989,7 +1016,7 @@ void tcp_reno_cong_avoid(struct sock *sk, u32 ack, u32 acked);
 extern struct tcp_congestion_ops tcp_reno;
 
 struct tcp_congestion_ops *tcp_ca_find_key(u32 key);
-u32 tcp_ca_get_key_by_name(const char *name, bool *ecn_ca);
+u32 tcp_ca_get_key_by_name(struct net *net, const char *name, bool *ecn_ca);
 #ifdef CONFIG_INET
 char *tcp_ca_get_name_by_key(u32 key, char *buffer);
 #else
@@ -1541,6 +1568,9 @@ void tcp_fastopen_init_key_once(bool publish);
 bool tcp_fastopen_cookie_check(struct sock *sk, u16 *mss,
 			     struct tcp_fastopen_cookie *cookie);
 bool tcp_fastopen_defer_connect(struct sock *sk, int *err);
+void tcp_fastopen_active_disable(struct sock *sk);
+bool tcp_fastopen_active_should_disable(struct sock *sk);
+void tcp_fastopen_active_disable_ofo_check(struct sock *sk);
 #define TCP_FASTOPEN_KEY_LENGTH 16
 
 static inline void tcp_init_send_head(struct sock *sk)
@@ -1995,5 +2025,162 @@ static inline void tcp_listendrop(const struct sock *sk)
 	atomic_inc(&((struct sock *)sk)->sk_drops);
 	__NET_INC_STATS(sock_net(sk), LINUX_MIB_LISTENDROPS);
 }
+
+struct sk_msg;
+struct sk_psock;
+
+int tcp_bpf_init(struct sock *sk);
+void tcp_bpf_reinit(struct sock *sk);
+int tcp_bpf_sendmsg_redir(struct sock *sk, struct sk_msg *msg, u32 bytes,
+			  int flags);
+int tcp_bpf_recvmsg(struct sock *sk, struct msghdr *msg, size_t len,
+		    int nonblock, int flags, int *addr_len);
+int __tcp_bpf_recvmsg(struct sock *sk, struct sk_psock *psock,
+		      struct msghdr *msg, int len, int flags);
+
+/* Call BPF_SOCK_OPS program that returns an int. If the return value
+ * is < 0, then the BPF op failed (for example if the loaded BPF
+ * program does not support the chosen operation or there is no BPF
+ * program loaded).
+ */
+#ifdef CONFIG_BPF
+static inline int tcp_call_bpf(struct sock *sk, int op, u32 nargs, u32 *args)
+{
+	struct bpf_sock_ops_kern sock_ops;
+	int ret;
+
+	memset(&sock_ops, 0, offsetof(struct bpf_sock_ops_kern, temp));
+	if (sk_fullsock(sk)) {
+		sock_ops.is_fullsock = 1;
+		sock_owned_by_me(sk);
+	}
+
+	sock_ops.sk = sk;
+	sock_ops.op = op;
+	if (nargs > 0)
+		memcpy(sock_ops.args, args, nargs * sizeof(*args));
+
+	ret = BPF_CGROUP_RUN_PROG_SOCK_OPS(&sock_ops);
+	if (ret == 0)
+		ret = sock_ops.reply;
+	else
+		ret = -1;
+	return ret;
+}
+
+static inline int tcp_call_bpf_2arg(struct sock *sk, int op, u32 arg1, u32 arg2)
+{
+	u32 args[2] = {arg1, arg2};
+
+	return tcp_call_bpf(sk, op, 2, args);
+}
+
+static inline int tcp_call_bpf_3arg(struct sock *sk, int op, u32 arg1, u32 arg2,
+				    u32 arg3)
+{
+	u32 args[3] = {arg1, arg2, arg3};
+
+	return tcp_call_bpf(sk, op, 3, args);
+}
+
+static inline void tcp_clear_sock_ops_cb_flags(struct sock *sk)
+{
+	tcp_sk(sk)->bpf_sock_ops_cb_flags = 0;
+}
+
+#else
+static inline int tcp_call_bpf(struct sock *sk, int op, u32 nargs, u32 *args)
+{
+	return -EPERM;
+}
+
+static inline int tcp_call_bpf_2arg(struct sock *sk, int op, u32 arg1, u32 arg2)
+{
+	return -EPERM;
+}
+
+static inline int tcp_call_bpf_3arg(struct sock *sk, int op, u32 arg1, u32 arg2,
+				    u32 arg3)
+{
+	return -EPERM;
+}
+
+static inline void tcp_clear_sock_ops_cb_flags(struct sock *sk)
+{
+}
+
+#endif
+
+static inline u32 tcp_rwnd_init_bpf(struct sock *sk)
+{
+	int rwnd;
+
+	rwnd = tcp_call_bpf(sk, BPF_SOCK_OPS_RWND_INIT, 0, NULL);
+
+	if (rwnd < 0)
+		rwnd = 0;
+	return rwnd;
+}
+
+static inline u32 tcp_timeout_init(struct sock *sk)
+{
+	int timeout;
+
+	timeout = tcp_call_bpf(sk, BPF_SOCK_OPS_TIMEOUT_INIT, 0, NULL);
+
+	if (timeout <= 0)
+		timeout = TCP_TIMEOUT_INIT;
+	return timeout;
+}
+
+static inline bool tcp_bpf_ca_needs_ecn(struct sock *sk)
+{
+	return (tcp_call_bpf(sk, BPF_SOCK_OPS_NEEDS_ECN, 0, NULL) == 1);
+}
+
+static inline void tcp_bpf_rtt(struct sock *sk)
+{
+	if (BPF_SOCK_OPS_TEST_FLAG(tcp_sk(sk), BPF_SOCK_OPS_RTT_CB_FLAG))
+		tcp_call_bpf(sk, BPF_SOCK_OPS_RTT_CB, 0, NULL);
+}
+/*
+ * Interface for adding Upper Level Protocols over TCP
+ */
+
+#define TCP_ULP_NAME_MAX	16
+#define TCP_ULP_MAX		128
+#define TCP_ULP_BUF_MAX		(TCP_ULP_NAME_MAX*TCP_ULP_MAX)
+
+enum {
+	TCP_ULP_TLS,
+	TCP_ULP_BPF,
+};
+
+struct tcp_ulp_ops {
+	struct list_head	list;
+
+	/* initialize ulp */
+	int (*init)(struct sock *sk);
+	/* cleanup ulp */
+	void (*release)(struct sock *sk);
+
+	int             uid;
+	char		name[TCP_ULP_NAME_MAX];
+	bool            user_visible;
+	struct module	*owner;
+};
+int tcp_register_ulp(struct tcp_ulp_ops *type);
+void tcp_unregister_ulp(struct tcp_ulp_ops *type);
+int tcp_set_ulp(struct sock *sk, const char *name);
+void tcp_get_available_ulp(char *buf, size_t len);
+void tcp_cleanup_ulp(struct sock *sk);
+
+#define MODULE_ALIAS_TCP_ULP(name)				\
+	__MODULE_INFO(alias, alias_userspace, name);		\
+	__MODULE_INFO(alias, alias_tcp_ulp, "tcp-ulp-" name)
+
+#define MODULE_ALIAS_TCP_ULP(name)				\
+	__MODULE_INFO(alias, alias_userspace, name);		\
+	__MODULE_INFO(alias, alias_tcp_ulp, "tcp-ulp-" name)
 
 #endif	/* _TCP_H */

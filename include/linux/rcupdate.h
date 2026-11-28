@@ -514,6 +514,7 @@ int rcu_read_lock_bh_held(void);
  * critical section unless it can prove otherwise.
  */
 int rcu_read_lock_sched_held(void);
+int rcu_read_lock_any_held(void);
 
 #else /* #ifdef CONFIG_DEBUG_LOCK_ALLOC */
 
@@ -534,6 +535,12 @@ static inline int rcu_read_lock_sched_held(void)
 {
 	return !preemptible();
 }
+
+static inline int rcu_read_lock_any_held(void)
+{
+	return !preemptible();
+}
+
 #endif /* #else #ifdef CONFIG_DEBUG_LOCK_ALLOC */
 
 #ifdef CONFIG_PROVE_RCU
@@ -660,6 +667,15 @@ static inline void rcu_preempt_sleep_check(void)
  * please be careful when making changes to rcu_assign_pointer() and the
  * other macros that it invokes.
  */
+/**
+ * rcu_swap_protected() - swap an RCU and a regular pointer
+ */
+#define rcu_swap_protected(rcu_ptr, ptr, c) do {			\
+	typeof(ptr) __tmp = rcu_dereference_protected((rcu_ptr), (c));	\
+	rcu_assign_pointer((rcu_ptr), (ptr));				\
+	(ptr) = __tmp;							\
+} while (0)
+
 #define rcu_assign_pointer(p, v)					      \
 ({									      \
 	uintptr_t _r_a_p__v = (uintptr_t)(v);				      \

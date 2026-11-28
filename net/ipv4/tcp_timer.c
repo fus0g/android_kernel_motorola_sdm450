@@ -231,6 +231,7 @@ static int tcp_write_timeout(struct sock *sk)
 	struct net *net = sock_net(sk);
 	int retry_until;
 	bool do_reset, syn_set = false;
+	bool expired;
 
 	if ((1 << sk->sk_state) & (TCPF_SYN_SENT | TCPF_SYN_RECV)) {
 		if (icsk->icsk_retransmits) {
@@ -279,13 +280,21 @@ static int tcp_write_timeout(struct sock *sk)
 				return 1;
 		}
 	}
+	expired = retransmits_timed_out(sk, retry_until,
+					syn_set ? 0 : icsk->icsk_user_timeout,
+					syn_set);
 
-	if (retransmits_timed_out(sk, retry_until,
-				  syn_set ? 0 : icsk->icsk_user_timeout, syn_set)) {
+	if (BPF_SOCK_OPS_TEST_FLAG(tp, BPF_SOCK_OPS_RTO_CB_FLAG))
+		tcp_call_bpf_3arg(sk, BPF_SOCK_OPS_RTO_CB,
+				  icsk->icsk_retransmits,
+				  icsk->icsk_rto, (int)expired);
+
+	if (expired) {
 		/* Has it gone just too far? */
 		tcp_write_err(sk);
 		return 1;
 	}
+
 	return 0;
 }
 
@@ -473,8 +482,6 @@ void tcp_retransmit_timer(struct sock *sk)
 		goto out;
 
 	WARN_ON(tcp_write_queue_empty(sk));
-
-	tp->tlp_high_seq = 0;
 
 	if (!tp->snd_wnd && !sock_flag(sk, SOCK_DEAD) &&
 	    !((1 << sk->sk_state) & (TCPF_SYN_SENT | TCPF_SYN_RECV))) {

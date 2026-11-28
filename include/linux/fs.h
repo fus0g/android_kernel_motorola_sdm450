@@ -706,7 +706,10 @@ struct inode {
 #ifdef CONFIG_IMA
 	atomic_t		i_readcount; /* struct files open RO */
 #endif
-	const struct file_operations	*i_fop;	/* former ->i_op->default_file_ops */
+	union {
+		const struct file_operations	*i_fop;	/* former ->i_op->default_file_ops */
+		void (*free_inode)(struct inode *);
+	};
 	struct file_lock_context	*i_flctx;
 	struct address_space	i_data;
 	struct list_head	i_devices;
@@ -1641,6 +1644,9 @@ extern int vfs_create2(struct vfsmount *, struct inode *, struct dentry *, umode
 extern int vfs_mkdir(struct inode *, struct dentry *, umode_t);
 extern int vfs_mkdir2(struct vfsmount *, struct inode *, struct dentry *, umode_t);
 extern int vfs_mknod(struct inode *, struct dentry *, umode_t, dev_t);
+int vfs_mkobj(struct dentry *, umode_t,
+		int (*)(struct dentry *, umode_t, void *),
+		void *);
 extern int vfs_mknod2(struct vfsmount *, struct inode *, struct dentry *, umode_t, dev_t);
 extern int vfs_symlink(struct inode *, struct dentry *, const char *);
 extern int vfs_symlink2(struct vfsmount *, struct inode *, struct dentry *, const char *);
@@ -1831,6 +1837,7 @@ extern int vfs_dedupe_file_range(struct file *file,
 struct super_operations {
    	struct inode *(*alloc_inode)(struct super_block *sb);
 	void (*destroy_inode)(struct inode *);
+	void (*free_inode)(struct inode *);
 
    	void (*dirty_inode) (struct inode *, int flags);
 	int (*write_inode) (struct inode *, struct writeback_control *wbc);
@@ -1888,6 +1895,7 @@ struct super_operations {
 #define S_DAX		0	/* Make all the DAX code disappear */
 #endif
 #define S_ENCRYPTED	16384	/* Encrypted file (using fs/crypto/) */
+#define S_VERITY	65536	/* Verity file (using fs/verity/) */
 
 /*
  * Note that nosuid etc flags are inode-specific: setting some file-system
@@ -1927,6 +1935,7 @@ struct super_operations {
 #define IS_NOSEC(inode)		((inode)->i_flags & S_NOSEC)
 #define IS_DAX(inode)		((inode)->i_flags & S_DAX)
 #define IS_ENCRYPTED(inode)	((inode)->i_flags & S_ENCRYPTED)
+#define IS_VERITY(inode)	((inode)->i_flags & S_VERITY)
 
 #define IS_WHITEOUT(inode)	(S_ISCHR(inode->i_mode) && \
 				 (inode)->i_rdev == WHITEOUT_DEV)
@@ -3056,9 +3065,10 @@ extern const struct file_operations simple_dir_operations;
 extern const struct inode_operations simple_dir_inode_operations;
 extern void make_empty_dir_inode(struct inode *inode);
 extern bool is_empty_dir_inode(struct inode *inode);
-struct tree_descr { char *name; const struct file_operations *ops; int mode; };
+struct tree_descr { const char *name; const struct file_operations *ops; int mode; };
 struct dentry *d_alloc_name(struct dentry *, const char *);
-extern int simple_fill_super(struct super_block *, unsigned long, struct tree_descr *);
+extern int simple_fill_super(struct super_block *, unsigned long,
+			     const struct tree_descr *);
 extern int simple_pin_fs(struct file_system_type *, struct vfsmount **mount, int *count);
 extern void simple_release_fs(struct vfsmount **mount, int *count);
 

@@ -809,10 +809,18 @@ __SYSCALL(__NR_copy_file_range, sys_copy_file_range)
 __SYSCALL(__NR_preadv2, compat_sys_preadv2)
 #define __NR_pwritev2 393
 __SYSCALL(__NR_pwritev2, compat_sys_pwritev2)
+#define __NR_statx 397
+__SYSCALL(__NR_statx, sys_statx)
 #define __NR_pidfd_send_signal 424
 __SYSCALL(__NR_pidfd_send_signal, sys_pidfd_send_signal)
 #define __NR_pidfd_open 434
 __SYSCALL(__NR_pidfd_open, sys_pidfd_open)
+#define __NR_clone3 435
+__SYSCALL(__NR_clone3, sys_clone3)
+#define __NR_close_range 436
+__SYSCALL(__NR_close_range, sys_close_range)
+#define __NR_process_mrelease 448
+__SYSCALL(__NR_process_mrelease, sys_process_mrelease)
 
 /*
  * Please add new compat syscalls above this comment and update

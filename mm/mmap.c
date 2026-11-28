@@ -1447,6 +1447,10 @@ unsigned long do_mmap(struct file *file, unsigned long addr,
 		if (!(file && path_noexec(&file->f_path)))
 			prot |= PROT_EXEC;
 
+	/* force arch specific MAP_FIXED handling in get_unmapped_area */
+	if (flags & MAP_FIXED_NOREPLACE)
+		flags |= MAP_FIXED;
+
 	if (!(flags & MAP_FIXED))
 		addr = round_hint_to_min(addr);
 
@@ -1469,6 +1473,13 @@ unsigned long do_mmap(struct file *file, unsigned long addr,
 	addr = get_unmapped_area(file, addr, len, pgoff, flags);
 	if (offset_in_page(addr))
 		return addr;
+
+	if (flags & MAP_FIXED_NOREPLACE) {
+		struct vm_area_struct *vma = find_vma(mm, addr);
+
+		if (vma && vma->vm_start < addr + len)
+			return -EEXIST;
+	}
 
 	if (prot == PROT_EXEC) {
 		pkey = execute_only_pkey(mm);
@@ -3121,6 +3132,32 @@ void exit_mmap(struct mm_struct *mm)
 	/* mm's last user has gone, and its about to be pulled down */
 	mmu_notifier_release(mm);
 
+	if (unlikely(mm_is_oom_victim(mm))) {
+		/*
+		 * Manually reap the mm to free as much memory as possible.
+		 * Then, as the oom reaper does, set MMF_OOM_SKIP to disregard
+		 * this mm from further consideration.  Taking mm->mmap_sem for
+		 * write after setting MMF_OOM_SKIP will guarantee that the oom
+		 * reaper will not run on this mm again after mmap_sem is
+		 * dropped.
+		 *
+		 * Nothing can be holding mm->mmap_sem here and the above call
+		 * to mmu_notifier_release(mm) ensures mmu notifier callbacks in
+		 * __oom_reap_task_mm() will not block.
+		 *
+		 * This needs to be done before calling munlock_vma_pages_all(),
+		 * which clears VM_LOCKED, otherwise the oom reaper cannot
+		 * reliably test it.
+		 */
+		mutex_lock(&oom_lock);
+		__oom_reap_task_mm(mm);
+		mutex_unlock(&oom_lock);
+
+		set_bit(MMF_OOM_SKIP, &mm->flags);
+		down_write(&mm->mmap_sem);
+		up_write(&mm->mmap_sem);
+	}
+
 	if (mm->locked_vm) {
 		vma = mm->mmap;
 		while (vma) {
@@ -3142,24 +3179,6 @@ void exit_mmap(struct mm_struct *mm)
 	/* update_hiwater_rss(mm) here? but nobody should be looking */
 	/* Use -1 here to ensure all VMAs in the mm are unmapped */
 	unmap_vmas(&tlb, vma, 0, -1);
-
-	if (unlikely(mm_is_oom_victim(mm))) {
-		/*
-		 * Wait for oom_reap_task() to stop working on this
-		 * mm. Because MMF_OOM_SKIP is already set before
-		 * calling down_read(), oom_reap_task() will not run
-		 * on this "mm" post up_write().
-		 *
-		 * mm_is_oom_victim() cannot be set from under us
-		 * either because victim->mm is already set to NULL
-		 * under task_lock before calling mmput and oom_mm is
-		 * set not NULL by the OOM killer only if victim->mm
-		 * is found not NULL while holding the task_lock.
-		 */
-		set_bit(MMF_OOM_SKIP, &mm->flags);
-		down_write(&mm->mmap_sem);
-		up_write(&mm->mmap_sem);
-	}
 	free_pgtables(&tlb, vma, FIRST_USER_ADDRESS, USER_PGTABLES_CEILING);
 	tlb_finish_mmu(&tlb, 0, -1);
 
@@ -3219,7 +3238,7 @@ int insert_vm_struct(struct mm_struct *mm, struct vm_area_struct *vma)
  */
 struct vm_area_struct *copy_vma(struct vm_area_struct **vmap,
 	unsigned long addr, unsigned long len, pgoff_t pgoff,
-	bool *need_rmap_locks)
+	bool *need_rmap_locks, bool keep_source)
 {
 	struct vm_area_struct *vma = *vmap;
 	unsigned long vma_start = vma->vm_start;
@@ -3250,7 +3269,8 @@ struct vm_area_struct *copy_vma(struct vm_area_struct **vmap,
 	 * new_vma == prev in case A,1,2
 	 * new_vma == next in case B,3
 	 */
-	new_vma = __vma_merge(mm, prev, addr, addr + len, vma->vm_flags,
+	new_vma = keep_source ? NULL :
+		  __vma_merge(mm, prev, addr, addr + len, vma->vm_flags,
 			      vma->anon_vma, vma->vm_file, pgoff,
 			      vma_policy(vma), vma->vm_userfaultfd_ctx,
 				vma_get_anon_name(vma), true);

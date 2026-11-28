@@ -73,6 +73,13 @@ static nokprobe_inline bool trace_kprobe_is_on_module(struct trace_kprobe *tk)
 	return !!strchr(trace_kprobe_symbol(tk), ':');
 }
 
+int trace_kprobe_ftrace(struct trace_event_call *call)
+{
+	struct trace_kprobe *tk = (struct trace_kprobe *)call->data;
+
+	return kprobe_ftrace(&tk->rp.kp);
+}
+
 static int register_kprobe_event(struct trace_kprobe *tk);
 static int unregister_kprobe_event(struct trace_kprobe *tk);
 
@@ -432,6 +439,14 @@ disable_trace_kprobe(struct trace_kprobe *tk, struct trace_event_file *file)
 			disable_kprobe(&tk->rp.kp);
 		wait = 1;
 	}
+
+	/*
+	 * if tk is not added to any list, it must be a local trace_kprobe
+	 * created with perf_event_open. We don't need to wait for these
+	 * trace_kprobes
+	 */
+	if (list_empty(&tk->list))
+		wait = 0;
  out:
 	if (wait) {
 		/*
@@ -1207,6 +1222,41 @@ kretprobe_perf_func(struct trace_kprobe *tk, struct kretprobe_instance *ri,
 			      head, NULL);
 }
 NOKPROBE_SYMBOL(kretprobe_perf_func);
+
+int bpf_get_kprobe_info(const struct perf_event *event, u32 *fd_type,
+			const char **symbol, u64 *probe_offset,
+			u64 *probe_addr, bool perf_type_tracepoint)
+{
+	const char *pevent = trace_event_name(event->tp_event);
+	const char *group = event->tp_event->class->system;
+	struct trace_kprobe *tk;
+
+	/*
+	 * Other probes can be freed while the list is walked. This one can
+	 * not be deleted while perf uses its event.
+	 */
+	if (perf_type_tracepoint) {
+		mutex_lock(&probe_lock);
+		tk = find_trace_kprobe(pevent, group);
+		mutex_unlock(&probe_lock);
+	} else
+		tk = event->tp_event->data;
+	if (!tk)
+		return -EINVAL;
+
+	*fd_type = trace_kprobe_is_return(tk) ? BPF_FD_TYPE_KRETPROBE
+					      : BPF_FD_TYPE_KPROBE;
+	if (tk->symbol) {
+		*symbol = tk->symbol;
+		*probe_offset = tk->rp.kp.offset;
+		*probe_addr = 0;
+	} else {
+		*symbol = NULL;
+		*probe_offset = 0;
+		*probe_addr = (unsigned long)tk->rp.kp.addr;
+	}
+	return 0;
+}
 #endif	/* CONFIG_PERF_EVENTS */
 
 /*
@@ -1283,12 +1333,9 @@ static struct trace_event_functions kprobe_funcs = {
 	.trace		= print_kprobe_event
 };
 
-static int register_kprobe_event(struct trace_kprobe *tk)
+static inline void init_trace_event_call(struct trace_kprobe *tk,
+					 struct trace_event_call *call)
 {
-	struct trace_event_call *call = &tk->tp.call;
-	int ret;
-
-	/* Initialize trace_event_call */
 	INIT_LIST_HEAD(&call->class->fields);
 	if (trace_kprobe_is_return(tk)) {
 		call->event.funcs = &kretprobe_funcs;
@@ -1297,6 +1344,19 @@ static int register_kprobe_event(struct trace_kprobe *tk)
 		call->event.funcs = &kprobe_funcs;
 		call->class->define_fields = kprobe_event_define_fields;
 	}
+
+	call->flags = TRACE_EVENT_FL_KPROBE;
+	call->class->reg = kprobe_register;
+	call->data = tk;
+}
+
+static int register_kprobe_event(struct trace_kprobe *tk)
+{
+	struct trace_event_call *call = &tk->tp.call;
+	int ret = 0;
+
+	init_trace_event_call(tk, call);
+
 	if (set_print_fmt(&tk->tp, trace_kprobe_is_return(tk)) < 0)
 		return -ENOMEM;
 	ret = register_trace_event(&call->event);
@@ -1304,9 +1364,6 @@ static int register_kprobe_event(struct trace_kprobe *tk)
 		kfree(call->print_fmt);
 		return -ENODEV;
 	}
-	call->flags = TRACE_EVENT_FL_KPROBE;
-	call->class->reg = kprobe_register;
-	call->data = tk;
 	ret = trace_add_event_call(call);
 	if (ret) {
 		pr_info("Failed to register kprobe event: %s\n",
@@ -1327,6 +1384,73 @@ static int unregister_kprobe_event(struct trace_kprobe *tk)
 		kfree(tk->tp.call.print_fmt);
 	return ret;
 }
+
+#ifdef CONFIG_PERF_EVENTS
+/* create a trace_kprobe, but don't add it to global lists */
+struct trace_event_call *
+create_local_trace_kprobe(char *func, void *addr, unsigned long offs,
+			  bool is_return)
+{
+	struct trace_kprobe *tk;
+	int ret;
+	char *event;
+
+	/*
+	 * local trace_kprobes are not added to probe_list, so they are never
+	 * searched in find_trace_kprobe(). Therefore, there is no concern of
+	 * duplicated name here.
+	 *
+	 * 4.9: with CONFIG_CFI_CLANG the function body is "<name>.cfi", which
+	 * is not a valid event name; the name is unused, so substitute one.
+	 */
+	event = func && is_good_name(func) ? func : "DUMMY_EVENT";
+
+	tk = alloc_trace_kprobe(KPROBE_EVENT_SYSTEM, event, (void *)addr, func,
+				offs, 0 /* nargs */,
+				is_return);
+
+	if (IS_ERR(tk)) {
+		pr_info("Failed to allocate trace_probe.(%d)\n",
+			(int)PTR_ERR(tk));
+		return ERR_CAST(tk);
+	}
+
+	init_trace_event_call(tk, &tk->tp.call);
+
+	if (set_print_fmt(&tk->tp, trace_kprobe_is_return(tk)) < 0) {
+		ret = -ENOMEM;
+		goto error;
+	}
+
+	ret = __register_trace_kprobe(tk);
+	if (ret < 0) {
+		kfree(tk->tp.call.print_fmt);
+		goto error;
+	}
+
+	return &tk->tp.call;
+error:
+	free_trace_kprobe(tk);
+	return ERR_PTR(ret);
+}
+
+void destroy_local_trace_kprobe(struct trace_event_call *event_call)
+{
+	struct trace_kprobe *tk;
+
+	tk = container_of(event_call, struct trace_kprobe, tp.call);
+
+	if (trace_probe_is_enabled(&tk->tp)) {
+		WARN_ON(1);
+		return;
+	}
+
+	__unregister_trace_kprobe(tk);
+
+	kfree(tk->tp.call.print_fmt);
+	free_trace_kprobe(tk);
+}
+#endif /* CONFIG_PERF_EVENTS */
 
 /* Make a tracefs interface for controlling probe points */
 static __init int init_kprobe_trace(void)

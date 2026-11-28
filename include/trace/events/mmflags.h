@@ -162,7 +162,7 @@ IF_HAVE_PG_IDLE(PG_idle,		"idle"		)
 	{VM_NORESERVE,			"noreserve"	},		\
 	{VM_HUGETLB,			"hugetlb"	},		\
 	__VM_ARCH_SPECIFIC_1				,		\
-	__VM_ARCH_SPECIFIC_2				,		\
+	{VM_WIPEONFORK,			"wipeonfork"	},		\
 	{VM_DONTDUMP,			"dontdump"	},		\
 IF_HAVE_VM_SOFTDIRTY(VM_SOFTDIRTY,	"softdirty"	)		\
 	{VM_MIXEDMAP,			"mixedmap"	},		\

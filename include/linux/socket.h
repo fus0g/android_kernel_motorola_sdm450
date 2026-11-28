@@ -202,8 +202,13 @@ struct ucred {
 #define AF_VSOCK	40	/* vSockets			*/
 #define AF_KCM		41	/* Kernel Connection Multiplexor*/
 #define AF_QIPCRTR	42	/* Qualcomm IPC Router          */
+#define AF_SMC		43	/* smc sockets: reserve number for
+				 * PF_SMC protocol family that
+				 * reuses AF_INET address family
+				 */
+#define AF_XDP		44	/* XDP sockets			*/
 
-#define AF_MAX		43	/* For now.. */
+#define AF_MAX		45	/* For now.. */
 
 /* Protocol families, same as address families. */
 #define PF_UNSPEC	AF_UNSPEC
@@ -251,6 +256,8 @@ struct ucred {
 #define PF_VSOCK	AF_VSOCK
 #define PF_KCM		AF_KCM
 #define PF_QIPCRTR	AF_QIPCRTR
+#define PF_SMC		AF_SMC
+#define PF_XDP		AF_XDP
 #define PF_MAX		AF_MAX
 
 /* Maximum queue length specifiable by listen.  */
@@ -281,6 +288,7 @@ struct ucred {
 #define MSG_SENDPAGE_NOTLAST 0x20000 /* sendpage() internal : not the last page */
 #define MSG_BATCH	0x40000 /* sendmmsg(): more messages coming */
 #define MSG_EOF         MSG_FIN
+#define MSG_NO_SHARED_FRAGS 0x80000 /* sendpage() internal : page frags are not shared */
 
 #define MSG_FASTOPEN	0x20000000	/* Send data in TCP SYN */
 #define MSG_CMSG_CLOEXEC 0x40000000	/* Set close_on_exec for file
@@ -329,6 +337,8 @@ struct ucred {
 #define SOL_ALG		279
 #define SOL_NFC		280
 #define SOL_KCM		281
+#define SOL_TLS		282
+#define SOL_XDP		283
 
 /* IPX options */
 #define IPX_TYPE	1

@@ -62,6 +62,7 @@
 #include <net/dsa.h>
 #include <net/flow_dissector.h>
 #include <linux/uaccess.h>
+#include <net/pkt_sched.h>
 
 __setup("ether=", netdev_boot_setup);
 
@@ -127,15 +128,16 @@ u32 eth_get_headlen(void *data, unsigned int len)
 {
 	const unsigned int flags = FLOW_DISSECTOR_F_PARSE_1ST_FRAG;
 	const struct ethhdr *eth = (const struct ethhdr *)data;
-	struct flow_keys keys;
+	struct flow_keys_basic keys;
 
 	/* this should never happen, but better safe than sorry */
 	if (unlikely(len < sizeof(*eth)))
 		return len;
 
 	/* parse any remaining L2/L3 headers, check for L4 */
-	if (!skb_flow_dissect_flow_keys_buf(&keys, data, eth->h_proto,
-					    sizeof(*eth), len, flags))
+	if (!skb_flow_dissect_flow_keys_basic(NULL, NULL, &keys, data,
+					      eth->h_proto, sizeof(*eth),
+					      len, flags))
 		return max_t(u32, keys.control.thoff, sizeof(*eth));
 
 	/* parse for any L4 headers */
@@ -364,7 +366,7 @@ void ether_setup(struct net_device *dev)
 	dev->min_header_len	= ETH_HLEN;
 	dev->mtu		= ETH_DATA_LEN;
 	dev->addr_len		= ETH_ALEN;
-	dev->tx_queue_len	= 1000;	/* Ethernet wants good queues */
+	dev->tx_queue_len	= DEFAULT_TX_QUEUE_LEN;
 	dev->flags		= IFF_BROADCAST|IFF_MULTICAST;
 	dev->priv_flags		|= IFF_TX_SKB_SHARING;
 

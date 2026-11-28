@@ -657,6 +657,12 @@ emit_clear:
 			break;
 
 		/*
+		 * BPF_ST NOSPEC (speculation barrier)
+		 */
+		case BPF_ST | BPF_NOSPEC:
+			break;
+
+		/*
 		 * BPF_ST(X)
 		 */
 		case BPF_STX | BPF_MEM | BPF_B: /* *(u8 *)(dst + off) = src */
@@ -773,7 +779,7 @@ emit_clear:
 			func = (u8 *) __bpf_call_base + imm;
 
 			/* Save skb pointer if we need to re-cache skb data */
-			if (bpf_helper_changes_skb_data(func))
+			if (bpf_helper_changes_pkt_data(func))
 				PPC_BPF_STL(3, 1, bpf_jit_stack_local(ctx));
 
 			bpf_jit_emit_func_call(image, ctx, (u64)func);
@@ -782,7 +788,7 @@ emit_clear:
 			PPC_MR(b2p[BPF_REG_0], 3);
 
 			/* refresh skb cache */
-			if (bpf_helper_changes_skb_data(func)) {
+			if (bpf_helper_changes_pkt_data(func)) {
 				/* reload skb pointer to r3 */
 				PPC_BPF_LL(3, 1, bpf_jit_stack_local(ctx));
 				bpf_jit_emit_skb_loads(image, ctx);
@@ -945,7 +951,7 @@ common_load:
 		/*
 		 * Tail call
 		 */
-		case BPF_JMP | BPF_CALL | BPF_X:
+		case BPF_JMP | BPF_TAIL_CALL:
 			ctx->seen |= SEEN_TAILCALL;
 			ret = bpf_jit_emit_tail_call(image, ctx, addrs[i + 1]);
 			if (ret < 0)
@@ -970,8 +976,6 @@ common_load:
 	return 0;
 }
 
-void bpf_jit_compile(struct bpf_prog *fp) { }
-
 struct bpf_prog *bpf_int_jit_compile(struct bpf_prog *fp)
 {
 	u32 proglen;
@@ -987,7 +991,7 @@ struct bpf_prog *bpf_int_jit_compile(struct bpf_prog *fp)
 	struct bpf_prog *tmp_fp;
 	bool bpf_blinded = false;
 
-	if (!bpf_jit_enable)
+	if (!fp->jit_requested)
 		return org_fp;
 
 	tmp_fp = bpf_jit_blind_constants(org_fp);
@@ -1064,6 +1068,7 @@ struct bpf_prog *bpf_int_jit_compile(struct bpf_prog *fp)
 #endif
 		fp->bpf_func = (void *)image;
 		fp->jited = 1;
+		fp->jited_len = alloclen;
 	}
 
 out:
@@ -1075,6 +1080,7 @@ out:
 	return fp;
 }
 
+/* Overriding bpf_jit_free() as we don't set images read-only. */
 void bpf_jit_free(struct bpf_prog *fp)
 {
 	unsigned long addr = (unsigned long)fp->bpf_func & PAGE_MASK;

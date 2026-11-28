@@ -20,6 +20,7 @@
 #define __ASM_CACHEFLUSH_H
 
 #include <linux/mm.h>
+#include <asm/set_memory.h>
 
 /*
  * This flag is used to indicate that the page pointed to by a pte is clean
@@ -76,6 +77,7 @@ extern void __flush_dcache_area(void *addr, size_t len);
 extern void __clean_dcache_area_poc(void *addr, size_t len);
 extern void __clean_dcache_area_pou(void *addr, size_t len);
 extern long __flush_cache_user_range(unsigned long start, unsigned long end);
+extern void sync_icache_aliases(void *kaddr, unsigned long len);
 
 static inline void flush_cache_mm(struct mm_struct *mm)
 {
@@ -155,10 +157,5 @@ static inline void flush_cache_vmap(unsigned long start, unsigned long end)
 static inline void flush_cache_vunmap(unsigned long start, unsigned long end)
 {
 }
-
-int set_memory_ro(unsigned long addr, int numpages);
-int set_memory_rw(unsigned long addr, int numpages);
-int set_memory_x(unsigned long addr, int numpages);
-int set_memory_nx(unsigned long addr, int numpages);
 
 #endif

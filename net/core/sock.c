@@ -135,6 +135,7 @@
 
 #include <linux/filter.h>
 #include <net/sock_reuseport.h>
+#include <net/bpf_sk_storage.h>
 
 #include <trace/events/sock.h>
 
@@ -219,7 +220,8 @@ static const char *const af_family_key_strings[AF_MAX+1] = {
   "sk_lock-AF_RXRPC" , "sk_lock-AF_ISDN"     , "sk_lock-AF_PHONET"   ,
   "sk_lock-AF_IEEE802154", "sk_lock-AF_CAIF" , "sk_lock-AF_ALG"      ,
   "sk_lock-AF_NFC"   , "sk_lock-AF_VSOCK"    , "sk_lock-AF_KCM"      ,
-  "sk_lock-AF_QIPCRTR", "sk_lock-AF_MAX"
+  "sk_lock-AF_QIPCRTR", "sk_lock-AF_SMC" , "sk_lock-AF_XDP",
+  "sk_lock-AF_MAX"
 };
 static const char *const af_family_slock_key_strings[AF_MAX+1] = {
   "slock-AF_UNSPEC", "slock-AF_UNIX"     , "slock-AF_INET"     ,
@@ -236,7 +238,8 @@ static const char *const af_family_slock_key_strings[AF_MAX+1] = {
   "slock-AF_RXRPC" , "slock-AF_ISDN"     , "slock-AF_PHONET"   ,
   "slock-AF_IEEE802154", "slock-AF_CAIF" , "slock-AF_ALG"      ,
   "slock-AF_NFC"   , "slock-AF_VSOCK"    ,"slock-AF_KCM"       ,
-  "slock-AF_QIPCRTR", "slock-AF_MAX"
+  "slock-AF_QIPCRTR", "slock-AF_SMC" , "slock-AF_XDP",
+  "slock-AF_MAX"
 };
 static const char *const af_family_clock_key_strings[AF_MAX+1] = {
   "clock-AF_UNSPEC", "clock-AF_UNIX"     , "clock-AF_INET"     ,
@@ -253,7 +256,8 @@ static const char *const af_family_clock_key_strings[AF_MAX+1] = {
   "clock-AF_RXRPC" , "clock-AF_ISDN"     , "clock-AF_PHONET"   ,
   "clock-AF_IEEE802154", "clock-AF_CAIF" , "clock-AF_ALG"      ,
   "clock-AF_NFC"   , "clock-AF_VSOCK"    , "clock-AF_KCM"      ,
-  "clock-AF_QIPCRTR", "clock-AF_MAX"
+  "clock-AF_QIPCRTR", "clock-AF_SMC" , "clock-AF_XDP",
+  "clock-AF_MAX"
 };
 
 /*
@@ -689,7 +693,11 @@ int sock_setsockopt(struct socket *sock, int level, int optname,
 		sk->sk_reuse = (valbool ? SK_CAN_REUSE : SK_NO_REUSE);
 		break;
 	case SO_REUSEPORT:
-		sk->sk_reuseport = valbool;
+		if (valbool && sk->sk_family != AF_INET &&
+		    sk->sk_family != AF_INET6)
+			ret = -EOPNOTSUPP;
+		else
+			sk->sk_reuseport = valbool;
 		break;
 	case SO_TYPE:
 	case SO_PROTOCOL:
@@ -945,10 +953,12 @@ set_rcvbuf:
 			clear_bit(SOCK_PASSSEC, &sock->flags);
 		break;
 	case SO_MARK:
-		if (!ns_capable(sock_net(sk)->user_ns, CAP_NET_ADMIN))
+		if (!ns_capable(sock_net(sk)->user_ns, CAP_NET_ADMIN)) {
 			ret = -EPERM;
-		else
+		} else if (val != sk->sk_mark) {
 			sk->sk_mark = val;
+			sk_dst_reset(sk);
+		}
 		break;
 
 	case SO_RXQ_OVFL:
@@ -1273,6 +1283,14 @@ int sock_getsockopt(struct socket *sock, int level, int optname,
 			return -EINVAL;
 		v.val64 = sock_gen_cookie(sk);
 		break;
+
+	case SO_NETNS_COOKIE:
+		lv = sizeof(u64);
+		if (len != lv)
+			return -EINVAL;
+		v.val64 = sock_net(sk)->net_cookie;
+		break;
+
 	default:
 		/* We implement the SO_SNDLOWAT etc to not be settable
 		 * (1003.1g 7).
@@ -1342,8 +1360,6 @@ static struct sock *sk_prot_alloc(struct proto *prot, gfp_t priority,
 		sk = kmalloc(prot->obj_size, priority);
 
 	if (sk != NULL) {
-		kmemcheck_annotate_bitfield(sk, flags);
-
 		if (security_sk_alloc(sk, family, priority))
 			goto out_free;
 
@@ -1441,6 +1457,10 @@ static void __sk_destruct(struct rcu_head *head)
 
 	sock_disable_timestamp(sk, SK_FLAGS_TIMESTAMP);
 
+#ifdef CONFIG_BPF_SYSCALL
+	bpf_sk_storage_free(sk);
+#endif
+
 	if (atomic_read(&sk->sk_omem_alloc))
 		pr_debug("%s: optmem leakage (%d bytes) detected\n",
 			 __func__, atomic_read(&sk->sk_omem_alloc));
@@ -1482,6 +1502,16 @@ static void __sk_free(struct sock *sk)
 		sk_destruct(sk);
 }
 
+void sk_free_unlock_clone(struct sock *sk)
+{
+	/* It is still raw copy of parent, so invalidate
+	 * destructor and make plain sk_free() */
+	sk->sk_destruct = NULL;
+	bh_unlock_sock(sk);
+	sk_free(sk);
+}
+EXPORT_SYMBOL(sk_free_unlock_clone);
+
 void sk_free(struct sock *sk)
 {
 	/*
@@ -1513,12 +1543,16 @@ struct sock *sk_clone_lock(const struct sock *sk, const gfp_t priority)
 		sock_copy(newsk, sk);
 
 		newsk->sk_prot_creator = sk->sk_prot;
+#ifdef CONFIG_BPF_SYSCALL
+		RCU_INIT_POINTER(newsk->sk_bpf_storage, NULL);
+#endif
 
 		/* SANITY */
 		if (likely(newsk->sk_net_refcnt))
 			get_net(sock_net(newsk));
 		sk_node_init(&newsk->sk_node);
 		sock_lock_init(newsk);
+		spin_lock_init(&newsk->sk_peer_lock);
 		bh_lock_sock(newsk);
 		newsk->sk_backlog.head	= newsk->sk_backlog.tail = NULL;
 		newsk->sk_backlog.len = 0;
@@ -1548,13 +1582,18 @@ struct sock *sk_clone_lock(const struct sock *sk, const gfp_t priority)
 		cgroup_sk_clone(&newsk->sk_cgrp_data);
 		skb_queue_head_init(&newsk->sk_error_queue);
 
-		filter = rcu_dereference_protected(newsk->sk_filter, 1);
+		RCU_INIT_POINTER(newsk->sk_reuseport_cb, NULL);
+
+		rcu_read_lock();
+		filter = rcu_dereference(sk->sk_filter);
 		if (filter != NULL)
 			/* though it's an empty new sock, the charging may fail
 			 * if sysctl_optmem_max was changed between creation of
 			 * original socket and cloning
 			 */
 			is_charged = sk_filter_charge(newsk, filter);
+		RCU_INIT_POINTER(newsk->sk_filter, filter);
+		rcu_read_unlock();
 
 		if (unlikely(!is_charged || xfrm_sk_clone_policy(newsk, sk))) {
 			/* We need to make sure that we don't uncharge the new
@@ -1571,7 +1610,18 @@ struct sock *sk_clone_lock(const struct sock *sk, const gfp_t priority)
 			newsk = NULL;
 			goto out;
 		}
-		RCU_INIT_POINTER(newsk->sk_reuseport_cb, NULL);
+
+		if (bpf_sk_storage_clone(sk, newsk)) {
+			sk_free_unlock_clone(newsk);
+			newsk = NULL;
+			goto out;
+		}
+
+		/* Clear sk_user_data if parent had the pointer tagged
+		 * as not suitable for copying when cloning.
+		 */
+		if (sk_user_data_is_nocopy(newsk))
+			newsk->sk_user_data = NULL;
 
 		newsk->sk_err	   = 0;
 		newsk->sk_err_soft = 0;
@@ -1712,20 +1762,14 @@ void skb_orphan_partial(struct sk_buff *skb)
 	if (skb_is_tcp_pure_ack(skb))
 		return;
 
-	if (skb->destructor == sock_wfree
+	if ((skb->destructor == sock_wfree
 #ifdef CONFIG_INET
-	    || skb->destructor == tcp_wfree
+	     || skb->destructor == tcp_wfree
 #endif
-		) {
-		struct sock *sk = skb->sk;
+		) && skb_set_owner_sk_safe(skb, skb->sk))
+		return;
 
-		if (atomic_inc_not_zero(&sk->sk_refcnt)) {
-			atomic_sub(skb->truesize, &sk->sk_wmem_alloc);
-			skb->destructor = sock_efree;
-		}
-	} else {
-		skb_orphan(skb);
-	}
+	skb_orphan(skb);
 }
 EXPORT_SYMBOL(skb_orphan_partial);
 
@@ -2222,7 +2266,7 @@ void __sk_mem_reclaim(struct sock *sk, int amount)
 	if (mem_cgroup_sockets_enabled && sk->sk_memcg)
 		mem_cgroup_uncharge_skmem(sk->sk_memcg, amount);
 
-	if (sk_under_memory_pressure(sk) &&
+	if (sk_under_global_memory_pressure(sk) &&
 	    (sk_memory_allocated(sk) < sk_prot_mem_limits(sk, 0)))
 		sk_leave_memory_pressure(sk);
 }
@@ -2460,7 +2504,7 @@ void sk_stop_timer(struct sock *sk, struct timer_list* timer)
 }
 EXPORT_SYMBOL(sk_stop_timer);
 
-void sock_init_data(struct socket *sock, struct sock *sk)
+void sock_init_data_uid(struct socket *sock, struct sock *sk, kuid_t uid)
 {
 	skb_queue_head_init(&sk->sk_receive_queue);
 	skb_queue_head_init(&sk->sk_write_queue);
@@ -2482,11 +2526,10 @@ void sock_init_data(struct socket *sock, struct sock *sk)
 		sk->sk_type	=	sock->type;
 		sk->sk_wq	=	sock->wq;
 		sock->sk	=	sk;
-		sk->sk_uid	=	SOCK_INODE(sock)->i_uid;
 	} else {
 		sk->sk_wq	=	NULL;
-		sk->sk_uid	=	make_kuid(sock_net(sk)->user_ns, 0);
 	}
+	sk->sk_uid	=	uid;
 
 	rwlock_init(&sk->sk_callback_lock);
 	lockdep_set_class_and_name(&sk->sk_callback_lock,
@@ -2532,6 +2575,16 @@ void sock_init_data(struct socket *sock, struct sock *sk)
 	smp_wmb();
 	atomic_set(&sk->sk_refcnt, 1);
 	atomic_set(&sk->sk_drops, 0);
+}
+EXPORT_SYMBOL(sock_init_data_uid);
+
+void sock_init_data(struct socket *sock, struct sock *sk)
+{
+	kuid_t uid = sock ?
+		SOCK_INODE(sock)->i_uid :
+		make_kuid(sock_net(sk)->user_ns, 0);
+
+	sock_init_data_uid(sock, sk, uid);
 }
 EXPORT_SYMBOL(sock_init_data);
 
@@ -3136,3 +3189,14 @@ static int __init proto_init(void)
 subsys_initcall(proto_init);
 
 #endif /* PROC_FS */
+
+#ifdef CONFIG_NET_RX_BUSY_POLL
+bool sk_busy_loop_end(void *p, unsigned long start_time)
+{
+	struct sock *sk = p;
+
+	return !skb_queue_empty(&sk->sk_receive_queue) ||
+	       sk_busy_loop_timeout(sk, start_time);
+}
+EXPORT_SYMBOL(sk_busy_loop_end);
+#endif /* CONFIG_NET_RX_BUSY_POLL */

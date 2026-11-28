@@ -988,7 +988,6 @@ static inline int audit_add_rule(struct audit_entry *entry)
 int audit_del_rule(struct audit_entry *entry)
 {
 	struct audit_entry  *e;
-	struct audit_tree *tree = entry->rule.tree;
 	struct list_head *list;
 	int ret = 0;
 #ifdef CONFIG_AUDITSYSCALL
@@ -1007,6 +1006,10 @@ int audit_del_rule(struct audit_entry *entry)
 		goto out;
 	}
 
+	list_del_rcu(&e->list);
+	list_del(&e->rule.list);
+	synchronize_rcu();
+
 	if (e->rule.watch)
 		audit_remove_watch_rule(&e->rule);
 
@@ -1024,15 +1027,10 @@ int audit_del_rule(struct audit_entry *entry)
 		audit_signals--;
 #endif
 
-	list_del_rcu(&e->list);
-	list_del(&e->rule.list);
 	call_rcu(&e->rcu, audit_free_rule_rcu);
 
 out:
 	mutex_unlock(&audit_filter_mutex);
-
-	if (tree)
-		audit_put_tree(tree);	/* that's the temporary one */
 
 	return ret;
 }
@@ -1123,6 +1121,8 @@ int audit_rule_change(int type, __u32 portid, int seq, void *data,
 	}
 
 	if (err || type == AUDIT_DEL_RULE) {
+		if (type == AUDIT_DEL_RULE && entry->rule.tree)
+			audit_put_tree(entry->rule.tree);
 		if (entry->rule.exe)
 			audit_remove_mark(entry->rule.exe);
 		audit_free_rule(entry);

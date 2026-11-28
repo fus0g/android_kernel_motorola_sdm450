@@ -2,7 +2,7 @@
 #define __INCLUDE_LINUX_OOM_H
 
 
-#include <linux/sched.h>
+#include <linux/sched/signal.h>
 #include <linux/types.h>
 #include <linux/nodemask.h>
 #include <uapi/linux/oom.h>
@@ -71,6 +71,8 @@ static inline bool mm_is_oom_victim(struct mm_struct *mm)
 {
 	return test_bit(MMF_OOM_VICTIM, &mm->flags);
 }
+
+void __oom_reap_task_mm(struct mm_struct *mm);
 
 extern unsigned long oom_badness(struct task_struct *p,
 		struct mem_cgroup *memcg, const nodemask_t *nodemask,

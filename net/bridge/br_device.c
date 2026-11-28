@@ -123,6 +123,15 @@ static int br_dev_init(struct net_device *dev)
 	return err;
 }
 
+static void br_dev_uninit(struct net_device *dev)
+{
+	struct net_bridge *br = netdev_priv(dev);
+
+	br_multicast_uninit_stats(br);
+	br_vlan_flush(br);
+	free_percpu(br->stats);
+}
+
 static int br_dev_open(struct net_device *dev)
 {
 	struct net_bridge *br = netdev_priv(dev);
@@ -345,6 +354,7 @@ static const struct net_device_ops br_netdev_ops = {
 	.ndo_open		 = br_dev_open,
 	.ndo_stop		 = br_dev_stop,
 	.ndo_init		 = br_dev_init,
+	.ndo_uninit		 = br_dev_uninit,
 	.ndo_start_xmit		 = br_dev_xmit,
 	.ndo_get_stats64	 = br_get_stats64,
 	.ndo_set_mac_address	 = br_set_mac_address,
@@ -360,8 +370,6 @@ static const struct net_device_ops br_netdev_ops = {
 	.ndo_add_slave		 = br_add_slave,
 	.ndo_del_slave		 = br_del_slave,
 	.ndo_fix_features        = br_fix_features,
-	.ndo_neigh_construct	 = netdev_default_l2upper_neigh_construct,
-	.ndo_neigh_destroy	 = netdev_default_l2upper_neigh_destroy,
 	.ndo_fdb_add		 = br_fdb_add,
 	.ndo_fdb_del		 = br_fdb_delete,
 	.ndo_fdb_dump		 = br_fdb_dump,
@@ -370,14 +378,6 @@ static const struct net_device_ops br_netdev_ops = {
 	.ndo_bridge_dellink	 = br_dellink,
 	.ndo_features_check	 = passthru_features_check,
 };
-
-static void br_dev_free(struct net_device *dev)
-{
-	struct net_bridge *br = netdev_priv(dev);
-
-	free_percpu(br->stats);
-	free_netdev(dev);
-}
 
 static struct device_type br_type = {
 	.name	= "bridge",
@@ -391,7 +391,7 @@ void br_dev_setup(struct net_device *dev)
 	ether_setup(dev);
 
 	dev->netdev_ops = &br_netdev_ops;
-	dev->destructor = br_dev_free;
+	dev->destructor = free_netdev;
 	dev->ethtool_ops = &br_ethtool_ops;
 	SET_NETDEV_DEVTYPE(dev, &br_type);
 	dev->priv_flags = IFF_EBRIDGE | IFF_NO_QUEUE;

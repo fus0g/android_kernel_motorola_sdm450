@@ -15,6 +15,7 @@ struct Qdisc_ops;
 struct qdisc_walker;
 struct tcf_walker;
 struct module;
+struct bpf_flow_keys;
 
 struct qdisc_rate_table {
 	struct tc_ratespec rate;
@@ -239,9 +240,11 @@ struct tcf_proto {
 };
 
 struct qdisc_skb_cb {
-	unsigned int		pkt_len;
-	u16			slave_dev_queue_mapping;
-	u16			tc_classid;
+	struct {
+		unsigned int		pkt_len;
+		u16			slave_dev_queue_mapping;
+		u16			tc_classid;
+	};
 #define QDISC_CB_PRIV_LEN 20
 	unsigned char		data[QDISC_CB_PRIV_LEN];
 };
@@ -421,6 +424,17 @@ static inline bool skb_at_tc_ingress(const struct sk_buff *skb)
 #else
 	return false;
 #endif
+}
+
+static inline bool skb_skip_tc_classify(struct sk_buff *skb)
+{
+#ifdef CONFIG_NET_CLS_ACT
+	if (skb->tc_skip_classify) {
+		skb->tc_skip_classify = 0;
+		return true;
+	}
+#endif
+	return false;
 }
 
 /* Reset all TX qdiscs greater then index of a device.  */

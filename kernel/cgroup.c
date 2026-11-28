@@ -89,13 +89,12 @@
  * These locks are exported if CONFIG_PROVE_RCU so that accessors in
  * cgroup.h can use them for lockdep annotations.
  */
-#ifdef CONFIG_PROVE_RCU
 DEFINE_MUTEX(cgroup_mutex);
-DEFINE_SPINLOCK(css_set_lock);
 EXPORT_SYMBOL_GPL(cgroup_mutex);
+#ifdef CONFIG_PROVE_RCU
+DEFINE_SPINLOCK(css_set_lock);
 EXPORT_SYMBOL_GPL(css_set_lock);
 #else
-static DEFINE_MUTEX(cgroup_mutex);
 static DEFINE_SPINLOCK(css_set_lock);
 #endif
 
@@ -2057,6 +2056,9 @@ static int cgroup_setup_root(struct cgroup_root *root, u16 ss_mask)
 	if (ret)
 		goto destroy_root;
 
+	ret = cgroup_bpf_inherit(root_cgrp);
+	WARN_ON_ONCE(ret);
+
 	trace_cgroup_setup_root(root);
 
 	/*
@@ -3588,14 +3590,19 @@ static ssize_t cgroup_pressure_write(struct kernfs_open_file *of, char *buf,
 	cgroup_get(cgrp);
 	cgroup_kn_unlock(of->kn);
 
-	new = psi_trigger_create(&cgrp->psi, buf, nbytes, res);
+	/* Allow only one trigger per file descriptor */
+	if (of->priv) {
+		cgroup_put(cgrp);
+		return -EBUSY;
+	}
+
+	new = psi_trigger_create(&cgrp->psi, buf, nbytes, res, of);
 	if (IS_ERR(new)) {
 		cgroup_put(cgrp);
 		return PTR_ERR(new);
 	}
 
-	psi_trigger_replace(&of->priv, new);
-
+	smp_store_release(&of->priv, new);
 	cgroup_put(cgrp);
 
 	return nbytes;
@@ -3630,7 +3637,7 @@ static unsigned int cgroup_pressure_poll(struct kernfs_open_file *of,
 
 static void cgroup_pressure_release(struct kernfs_open_file *of)
 {
-	psi_trigger_replace(&of->priv, NULL);
+	psi_trigger_destroy(of->priv);
 }
 #endif /* CONFIG_PSI */
 
@@ -5275,8 +5282,6 @@ static void css_release_work_fn(struct work_struct *work)
 		if (cgrp->kn)
 			RCU_INIT_POINTER(*(void __rcu __force **)&cgrp->kn->priv,
 					 NULL);
-
-		cgroup_bpf_put(cgrp);
 	}
 
 	mutex_unlock(&cgroup_mutex);
@@ -5459,6 +5464,9 @@ static struct cgroup *cgroup_create(struct cgroup *parent)
 	cgrp->self.parent = &parent->self;
 	cgrp->root = root;
 	cgrp->level = level;
+	ret = cgroup_bpf_inherit(cgrp);
+	if (ret)
+		goto out_idr_free;
 
 	for (tcgrp = cgrp; tcgrp; tcgrp = cgroup_parent(tcgrp))
 		cgrp->ancestor_ids[tcgrp->level] = tcgrp->id;
@@ -5494,9 +5502,6 @@ static struct cgroup *cgroup_create(struct cgroup *parent)
 		if (ret)
 			goto out_idr_free;
 	}
-
-	if (parent)
-		cgroup_bpf_inherit(cgrp, parent);
 
 	cgroup_propagate_control(cgrp);
 
@@ -5722,6 +5727,8 @@ static int cgroup_destroy_locked(struct cgroup *cgrp)
 	kernfs_remove(cgrp->kn);
 
 	check_for_release(cgroup_parent(cgrp));
+
+	cgroup_bpf_offline(cgrp);
 
 	/* put the base reference */
 	percpu_ref_kill(&cgrp->self.refcnt);
@@ -6549,6 +6556,7 @@ void cgroup_sk_alloc(struct sock_cgroup_data *skcd)
 		cset = task_css_set(current);
 		if (likely(cgroup_tryget(cset->dfl_cgrp))) {
 			skcd->val = (unsigned long)cset->dfl_cgrp;
+			cgroup_bpf_get(cset->dfl_cgrp);
 			break;
 		}
 		cpu_relax();
@@ -6569,15 +6577,18 @@ void cgroup_sk_clone(struct sock_cgroup_data *skcd)
 		 * Don't use cgroup_get_live().
 		 */
 		cgroup_get(sock_cgroup_ptr(skcd));
+		cgroup_bpf_get(sock_cgroup_ptr(skcd));
 	}
 }
 
 void cgroup_sk_free(struct sock_cgroup_data *skcd)
 {
+	struct cgroup *cgrp = sock_cgroup_ptr(skcd);
+
 	if (skcd->no_refcnt)
 		return;
-
-	cgroup_put(sock_cgroup_ptr(skcd));
+	cgroup_bpf_put(cgrp);
+	cgroup_put(cgrp);
 }
 
 #endif	/* CONFIG_SOCK_CGROUP_DATA */
@@ -6731,14 +6742,40 @@ static __init int cgroup_namespaces_init(void)
 subsys_initcall(cgroup_namespaces_init);
 
 #ifdef CONFIG_CGROUP_BPF
-int cgroup_bpf_update(struct cgroup *cgrp, struct bpf_prog *prog,
-		      enum bpf_attach_type type, bool overridable)
+int cgroup_bpf_attach(struct cgroup *cgrp, struct bpf_prog *prog,
+		      enum bpf_attach_type type, u32 flags)
 {
-	struct cgroup *parent = cgroup_parent(cgrp);
 	int ret;
 
 	mutex_lock(&cgroup_mutex);
-	ret = __cgroup_bpf_update(cgrp, parent, prog, type, overridable);
+	/*
+	 * The cgroup may have been removed since the caller looked it up.
+	 * Then its bpf state may be freed, and nothing would detach this.
+	 */
+	if (cgroup_is_dead(cgrp))
+		ret = -ENOENT;
+	else
+		ret = __cgroup_bpf_attach(cgrp, prog, type, flags);
+	mutex_unlock(&cgroup_mutex);
+	return ret;
+}
+int cgroup_bpf_detach(struct cgroup *cgrp, struct bpf_prog *prog,
+		      enum bpf_attach_type type, u32 flags)
+{
+	int ret;
+
+	mutex_lock(&cgroup_mutex);
+	ret = __cgroup_bpf_detach(cgrp, prog, type);
+	mutex_unlock(&cgroup_mutex);
+	return ret;
+}
+int cgroup_bpf_query(struct cgroup *cgrp, const union bpf_attr *attr,
+		     union bpf_attr __user *uattr)
+{
+	int ret;
+
+	mutex_lock(&cgroup_mutex);
+	ret = __cgroup_bpf_query(cgrp, attr, uattr);
 	mutex_unlock(&cgroup_mutex);
 	return ret;
 }

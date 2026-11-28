@@ -372,7 +372,9 @@ static int dst_md_discard(struct sk_buff *skb)
 	return 0;
 }
 
-static void __metadata_dst_init(struct metadata_dst *md_dst, u8 optslen)
+static void __metadata_dst_init(struct metadata_dst *md_dst,
+				enum metadata_type type, u8 optslen)
+
 {
 	struct dst_entry *dst;
 
@@ -384,9 +386,11 @@ static void __metadata_dst_init(struct metadata_dst *md_dst, u8 optslen)
 	dst->output = dst_md_discard_out;
 
 	memset(dst + 1, 0, sizeof(*md_dst) + optslen - sizeof(*dst));
+	md_dst->type = type;
 }
 
-struct metadata_dst *metadata_dst_alloc(u8 optslen, gfp_t flags)
+struct metadata_dst *metadata_dst_alloc(u8 optslen, enum metadata_type type,
+					gfp_t flags)
 {
 	struct metadata_dst *md_dst;
 
@@ -394,7 +398,7 @@ struct metadata_dst *metadata_dst_alloc(u8 optslen, gfp_t flags)
 	if (!md_dst)
 		return NULL;
 
-	__metadata_dst_init(md_dst, optslen);
+	__metadata_dst_init(md_dst, type, optslen);
 
 	return md_dst;
 }
@@ -403,12 +407,14 @@ EXPORT_SYMBOL_GPL(metadata_dst_alloc);
 void metadata_dst_free(struct metadata_dst *md_dst)
 {
 #ifdef CONFIG_DST_CACHE
-	dst_cache_destroy(&md_dst->u.tun_info.dst_cache);
+	if (md_dst->type == METADATA_IP_TUNNEL)
+		dst_cache_destroy(&md_dst->u.tun_info.dst_cache);
 #endif
 	kfree(md_dst);
 }
 
-struct metadata_dst __percpu *metadata_dst_alloc_percpu(u8 optslen, gfp_t flags)
+struct metadata_dst __percpu *
+metadata_dst_alloc_percpu(u8 optslen, enum metadata_type type, gfp_t flags)
 {
 	int cpu;
 	struct metadata_dst __percpu *md_dst;
@@ -419,7 +425,7 @@ struct metadata_dst __percpu *metadata_dst_alloc_percpu(u8 optslen, gfp_t flags)
 		return NULL;
 
 	for_each_possible_cpu(cpu)
-		__metadata_dst_init(per_cpu_ptr(md_dst, cpu), optslen);
+		__metadata_dst_init(per_cpu_ptr(md_dst, cpu), type, optslen);
 
 	return md_dst;
 }
@@ -507,3 +513,18 @@ void __init dst_subsys_init(void)
 {
 	register_netdevice_notifier(&dst_dev_notifier);
 }
+void metadata_dst_free_percpu(struct metadata_dst __percpu *md_dst)
+{
+	int cpu;
+
+#ifdef CONFIG_DST_CACHE
+	for_each_possible_cpu(cpu) {
+		struct metadata_dst *one_md_dst = per_cpu_ptr(md_dst, cpu);
+
+		if (one_md_dst->type == METADATA_IP_TUNNEL)
+			dst_cache_destroy(&one_md_dst->u.tun_info.dst_cache);
+	}
+#endif
+	free_percpu(md_dst);
+}
+EXPORT_SYMBOL_GPL(metadata_dst_free_percpu);

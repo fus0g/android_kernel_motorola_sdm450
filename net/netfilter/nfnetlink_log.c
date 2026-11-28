@@ -214,12 +214,17 @@ static void __nfulnl_flush(struct nfulnl_instance *inst);
 static void
 __instance_destroy(struct nfulnl_instance *inst)
 {
+	spin_lock(&inst->lock);
+	if (inst->copy_mode == NFULNL_COPY_DISABLED) {
+		/* attempt to UNBIND a queue already pending
+		 * destruction via netlink close event. Ignore.
+		 */
+		spin_unlock(&inst->lock);
+		return;
+	}
+
 	/* first pull it out of the global list */
 	hlist_del_rcu(&inst->hlist);
-
-	/* then flush all pending packets from skb */
-
-	spin_lock(&inst->lock);
 
 	/* lockless readers wont be able to use us */
 	inst->copy_mode = NFULNL_COPY_DISABLED;
@@ -347,6 +352,7 @@ static void
 __nfulnl_send(struct nfulnl_instance *inst)
 {
 	if (inst->qlen > 1) {
+		struct nfgenmsg *nfmsg;
 		struct nlmsghdr *nlh = nlmsg_put(inst->skb, 0, 0,
 						 NLMSG_DONE,
 						 sizeof(struct nfgenmsg),
@@ -356,6 +362,10 @@ __nfulnl_send(struct nfulnl_instance *inst)
 			kfree_skb(inst->skb);
 			goto out;
 		}
+		nfmsg = nlmsg_data(nlh);
+		nfmsg->nfgen_family = AF_UNSPEC;
+		nfmsg->version = NFNETLINK_V0;
+		nfmsg->res_id = htons(inst->group_num);
 	}
 	nfnetlink_unicast(inst->skb, inst->net, inst->peer_portid,
 			  MSG_DONTWAIT);
@@ -508,7 +518,8 @@ __build_packet_message(struct nfnl_log_net *log,
 		goto nla_put_failure;
 
 	if (indev && skb->dev &&
-	    skb->mac_header != skb->network_header) {
+	    skb_mac_header_was_set(skb) &&
+	    skb_mac_header_len(skb) != 0) {
 		struct nfulnl_msg_packet_hw phw;
 		int len;
 

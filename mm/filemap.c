@@ -13,6 +13,7 @@
 #include <linux/compiler.h>
 #include <linux/dax.h>
 #include <linux/fs.h>
+#include <linux/sched/signal.h>
 #include <linux/uaccess.h>
 #include <linux/capability.h>
 #include <linux/kernel_stat.h>
@@ -2261,7 +2262,7 @@ static struct file *do_async_mmap_readahead(struct vm_area_struct *vma,
 	struct file *fpin = NULL;
 
 	/* If we don't want any read-ahead, don't bother */
-	if (vma->vm_flags & VM_RAND_READ)
+	if (vma->vm_flags & VM_RAND_READ || !ra->ra_pages)
 		return fpin;
 	if (ra->mmap_miss > 0)
 		ra->mmap_miss--;

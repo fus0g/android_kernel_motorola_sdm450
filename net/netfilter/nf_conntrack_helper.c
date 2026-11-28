@@ -351,8 +351,8 @@ __printf(3, 4)
 void nf_ct_helper_log(struct sk_buff *skb, const struct nf_conn *ct,
 		      const char *fmt, ...)
 {
+	const char *helper_name = "(null)";
 	const struct nf_conn_help *help;
-	const struct nf_conntrack_helper *helper;
 	struct va_format vaf;
 	va_list args;
 
@@ -361,14 +361,17 @@ void nf_ct_helper_log(struct sk_buff *skb, const struct nf_conn *ct,
 	vaf.fmt = fmt;
 	vaf.va = &args;
 
-	/* Called from the helper function, this call never fails */
 	help = nfct_help(ct);
+	if (help) {
+		const struct nf_conntrack_helper *helper;
 
-	/* rcu_read_lock()ed by nf_hook_thresh */
-	helper = rcu_dereference(help->helper);
+		helper = rcu_dereference(help->helper);
+		if (helper)
+			helper_name = helper->name;
+	}
 
 	nf_log_packet(nf_ct_net(ct), nf_ct_l3num(ct), 0, skb, NULL, NULL, NULL,
-		      "nf_ct_%s: dropping packet: %pV ", helper->name, &vaf);
+		      "helper %s dropping packet: %pV ", helper_name, &vaf);
 
 	va_end(args);
 }
@@ -392,7 +395,7 @@ int nf_conntrack_helper_register(struct nf_conntrack_helper *me)
 			    (cur->tuple.src.l3num == NFPROTO_UNSPEC ||
 			     cur->tuple.src.l3num == me->tuple.src.l3num) &&
 			    cur->tuple.dst.protonum == me->tuple.dst.protonum) {
-				ret = -EEXIST;
+				ret = -EBUSY;
 				goto out;
 			}
 		}
@@ -403,7 +406,7 @@ int nf_conntrack_helper_register(struct nf_conntrack_helper *me)
 		hlist_for_each_entry(cur, &nf_ct_helper_hash[h], hnode) {
 			if (nf_ct_tuple_src_mask_cmp(&cur->tuple, &me->tuple,
 						     &mask)) {
-				ret = -EEXIST;
+				ret = -EBUSY;
 				goto out;
 			}
 		}

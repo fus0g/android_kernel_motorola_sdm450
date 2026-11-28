@@ -211,7 +211,7 @@ struct sock_common {
 		struct hlist_node	skc_node;
 		struct hlist_nulls_node skc_nulls_node;
 	};
-	int			skc_tx_queue_mapping;
+	unsigned short		skc_tx_queue_mapping;
 	union {
 		int		skc_incoming_cpu;
 		u32		skc_rcv_wnd;
@@ -228,6 +228,8 @@ struct sock_common {
 	};
 	/* public: */
 };
+
+struct bpf_sk_storage;
 
 /**
   *	struct sock - network layer representation of sockets
@@ -390,7 +392,21 @@ struct sock {
 	 * Because of non atomicity rules, all
 	 * changes are protected by socket lock.
 	 */
-	kmemcheck_bitfield_begin(flags);
+	unsigned int		__sk_flags_offset[0];
+#ifdef __BIG_ENDIAN_BITFIELD
+#define SK_FL_PROTO_SHIFT  16
+#define SK_FL_PROTO_MASK   0x00ff0000
+
+#define SK_FL_TYPE_SHIFT   0
+#define SK_FL_TYPE_MASK    0x0000ffff
+#else
+#define SK_FL_PROTO_SHIFT  8
+#define SK_FL_PROTO_MASK   0x0000ff00
+
+#define SK_FL_TYPE_SHIFT   16
+#define SK_FL_TYPE_MASK    0xffff0000
+#endif
+
 	unsigned int		sk_padding : 2,
 				sk_no_check_tx : 1,
 				sk_no_check_rx : 1,
@@ -398,8 +414,6 @@ struct sock {
 				sk_protocol  : 8,
 				sk_type      : 16;
 #define SK_PROTOCOL_MAX U8_MAX
-	kmemcheck_bitfield_end(flags);
-
 	int			sk_wmem_queued;
 	gfp_t			sk_allocation;
 	u32			sk_pacing_rate; /* bytes per second */
@@ -454,8 +468,29 @@ struct sock {
 						  struct sk_buff *skb);
 	void                    (*sk_destruct)(struct sock *sk);
 	struct sock_reuseport __rcu	*sk_reuseport_cb;
+#ifdef CONFIG_BPF_SYSCALL
+	struct bpf_sk_storage __rcu	*sk_bpf_storage;
+#endif
 	struct rcu_head		sk_rcu;
 };
+
+/* Pointer stored in sk_user_data might not be suitable for copying
+ * when cloning the socket. For instance, it can point to a reference
+ * counted object. sk_user_data bottom bit is set if pointer must not
+ * be copied.
+ */
+#define SK_USER_DATA_NOCOPY	1UL
+#define SK_USER_DATA_BPF	2UL	/* Managed by BPF */
+#define SK_USER_DATA_PTRMASK	~(SK_USER_DATA_NOCOPY | SK_USER_DATA_BPF)
+
+/**
+ * sk_user_data_is_nocopy - Test if sk_user_data pointer must not be copied
+ * @sk: socket
+ */
+static inline bool sk_user_data_is_nocopy(const struct sock *sk)
+{
+	return ((uintptr_t)sk->sk_user_data & SK_USER_DATA_NOCOPY);
+}
 
 #define __sk_user_data(sk) ((*((void __rcu **)&(sk)->sk_user_data)))
 
@@ -912,7 +947,20 @@ static inline void sock_rps_record_flow_hash(__u32 hash)
 static inline void sock_rps_record_flow(const struct sock *sk)
 {
 #ifdef CONFIG_RPS
-	sock_rps_record_flow_hash(sk->sk_rxhash);
+	if (static_key_false(&rfs_needed)) {
+		/* Reading sk->sk_rxhash might incur an expensive cache line
+		 * miss.
+		 *
+		 * TCP_ESTABLISHED does cover almost all states where RFS
+		 * might be useful, and is cheaper [1] than testing :
+		 *	IPv4: inet_sk(sk)->inet_daddr
+		 * 	IPv6: ipv6_addr_any(&sk->sk_v6_daddr)
+		 * OR	an additional socket flag
+		 * [1] : sk_state and sk_prot are in the same cache line.
+		 */
+		if (sk->sk_state == TCP_ESTABLISHED)
+			sock_rps_record_flow_hash(sk->sk_rxhash);
+	}
 #endif
 }
 
@@ -990,6 +1038,9 @@ static inline void sk_prot_clear_nulls(struct sock *sk, int size)
 struct proto {
 	void			(*close)(struct sock *sk,
 					long timeout);
+	int			(*pre_connect)(struct sock *sk,
+					struct sockaddr *uaddr,
+					int addr_len);
 	int			(*connect)(struct sock *sk,
 					struct sockaddr *uaddr,
 					int addr_len);
@@ -1047,6 +1098,7 @@ struct proto {
 #endif
 
 	bool			(*stream_memory_free)(const struct sock *sk);
+	bool			(*stream_memory_read)(const struct sock *sk);
 	/* Memory pressure */
 	void			(*enter_memory_pressure)(struct sock *sk);
 	atomic_long_t		*memory_allocated;	/* Current allocated memory. */
@@ -1147,6 +1199,12 @@ static inline int sk_under_cgroup_hierarchy(struct sock *sk,
 static inline bool sk_has_memory_pressure(const struct sock *sk)
 {
 	return sk->sk_prot->memory_pressure != NULL;
+}
+
+static inline bool sk_under_global_memory_pressure(const struct sock *sk)
+{
+	return sk->sk_prot->memory_pressure &&
+		!!*sk->sk_prot->memory_pressure;
 }
 
 static inline bool sk_under_memory_pressure(const struct sock *sk)
@@ -1489,6 +1547,7 @@ static inline bool sock_allow_reclassification(const struct sock *csk)
 struct sock *sk_alloc(struct net *net, int family, gfp_t priority,
 		      struct proto *prot, int kern);
 void sk_free(struct sock *sk);
+void sk_free_unlock_clone(struct sock *sk);
 void sk_destruct(struct sock *sk);
 struct sock *sk_clone_lock(const struct sock *sk, const gfp_t priority);
 
@@ -1574,7 +1633,12 @@ void sk_common_release(struct sock *sk);
  *	Default socket callbacks and setup code
  */
 
-/* Initialise core socket variables */
+/* Initialise core socket variables using an explicit uid. */
+void sock_init_data_uid(struct socket *sock, struct sock *sk, kuid_t uid);
+
+/* Initialise core socket variables.
+ * Assumes struct socket *sock is embedded in a struct socket_alloc.
+ */
 void sock_init_data(struct socket *sock, struct sock *sk);
 
 /*
@@ -1623,17 +1687,25 @@ static inline int sk_receive_skb(struct sock *sk, struct sk_buff *skb,
 
 static inline void sk_tx_queue_set(struct sock *sk, int tx_queue)
 {
+	/* sk_tx_queue_mapping accept only upto a 16-bit value */
+	if (WARN_ON_ONCE((unsigned short)tx_queue >= USHRT_MAX))
+		return;
 	sk->sk_tx_queue_mapping = tx_queue;
 }
 
+#define NO_QUEUE_MAPPING	USHRT_MAX
+
 static inline void sk_tx_queue_clear(struct sock *sk)
 {
-	sk->sk_tx_queue_mapping = -1;
+	sk->sk_tx_queue_mapping = NO_QUEUE_MAPPING;
 }
 
 static inline int sk_tx_queue_get(const struct sock *sk)
 {
-	return sk ? sk->sk_tx_queue_mapping : -1;
+	if (sk && sk->sk_tx_queue_mapping != NO_QUEUE_MAPPING)
+		return sk->sk_tx_queue_mapping;
+
+	return -1;
 }
 
 static inline void sk_set_socket(struct sock *sk, struct socket *sock)
@@ -1972,6 +2044,17 @@ static inline void skb_set_owner_r(struct sk_buff *skb, struct sock *sk)
 	skb->destructor = sock_rfree;
 	atomic_add(skb->truesize, &sk->sk_rmem_alloc);
 	sk_mem_charge(sk, skb->truesize);
+}
+
+static inline __must_check bool skb_set_owner_sk_safe(struct sk_buff *skb, struct sock *sk)
+{
+	if (sk && atomic_inc_not_zero(&sk->sk_refcnt)) {
+		skb_orphan(skb);
+		skb->destructor = sock_efree;
+		skb->sk = sk;
+		return true;
+	}
+	return false;
 }
 
 void sk_reset_timer(struct sock *sk, struct timer_list *timer,

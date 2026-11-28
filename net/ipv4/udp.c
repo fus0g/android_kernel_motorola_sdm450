@@ -218,11 +218,12 @@ static int udp_reuseport_add_sock(struct sock *sk, struct udp_hslot *hslot,
 		    (sk2->sk_bound_dev_if == sk->sk_bound_dev_if) &&
 		    sk2->sk_reuseport && uid_eq(uid, sock_i_uid(sk2)) &&
 		    (*saddr_same)(sk, sk2, false)) {
-			return reuseport_add_sock(sk, sk2);
+			return reuseport_add_sock(sk, sk2,
+						  inet_rcv_saddr_any(sk));
 		}
 	}
 
-	return reuseport_alloc(sk);
+	return reuseport_alloc(sk, inet_rcv_saddr_any(sk));
 }
 
 /**
@@ -333,6 +334,8 @@ found:
 			goto fail_unlock;
 		}
 
+		sock_set_flag(sk, SOCK_RCU_FREE);
+
 		sk_add_node_rcu(sk, &hslot->head);
 		hslot->count++;
 		sock_prot_inuse_add(sock_net(sk), sk->sk_prot, 1);
@@ -349,7 +352,7 @@ found:
 		hslot2->count++;
 		spin_unlock(&hslot2->lock);
 	}
-	sock_set_flag(sk, SOCK_RCU_FREE);
+
 	error = 0;
 fail_unlock:
 	spin_unlock_bh(&hslot->lock);
@@ -472,6 +475,8 @@ static struct sock *udp4_lib_lookup2(struct net *net,
 						   saddr, sport);
 				result = reuseport_select_sock(sk, hash, skb,
 							sizeof(struct udphdr));
+				if (unlikely(IS_ERR(result)))
+					return NULL;
 				if (result)
 					return result;
 				matches = 1;
@@ -528,6 +533,8 @@ struct sock *__udp4_lib_lookup(struct net *net, __be32 saddr,
 						  daddr, hnum, dif,
 						  hslot2, skb);
 		}
+		if (unlikely(IS_ERR(result)))
+			return NULL;
 		return result;
 	}
 begin:
@@ -543,6 +550,8 @@ begin:
 						   saddr, sport);
 				result = reuseport_select_sock(sk, hash, skb,
 							sizeof(struct udphdr));
+				if (unlikely(IS_ERR(result)))
+					return NULL;
 				if (result)
 					return result;
 				matches = 1;
@@ -880,6 +889,7 @@ int udp_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 {
 	struct inet_sock *inet = inet_sk(sk);
 	struct udp_sock *up = udp_sk(sk);
+	DECLARE_SOCKADDR(struct sockaddr_in *, usin, msg->msg_name);
 	struct flowi4 fl4_stack;
 	struct flowi4 *fl4;
 	int ulen = len;
@@ -934,8 +944,7 @@ int udp_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 	/*
 	 *	Get and verify the address.
 	 */
-	if (msg->msg_name) {
-		DECLARE_SOCKADDR(struct sockaddr_in *, usin, msg->msg_name);
+	if (usin) {
 		if (msg->msg_namelen < sizeof(*usin))
 			return -EINVAL;
 		if (usin->sin_family != AF_INET) {
@@ -983,6 +992,22 @@ int udp_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 			ipc.opt = &opt_copy.opt;
 		}
 		rcu_read_unlock();
+	}
+
+	if (cgroup_bpf_enabled && !connected) {
+		err = BPF_CGROUP_RUN_PROG_UDP4_SENDMSG_LOCK(sk,
+					    (struct sockaddr *)usin, &ipc.addr);
+		if (err)
+			goto out_free;
+		if (usin) {
+			if (usin->sin_port == 0) {
+				/* BPF program set invalid port. Reject it. */
+				err = -EINVAL;
+				goto out_free;
+			}
+			daddr = usin->sin_addr.s_addr;
+			dport = usin->sin_port;
+		}
 	}
 
 	saddr = ipc.addr;
@@ -1330,6 +1355,10 @@ try_again:
 		sin->sin_addr.s_addr = ip_hdr(skb)->saddr;
 		memset(sin->sin_zero, 0, sizeof(sin->sin_zero));
 		*addr_len = sizeof(*sin);
+
+		if (cgroup_bpf_enabled)
+			BPF_CGROUP_RUN_PROG_UDP4_RECVMSG_LOCK(sk,
+							(struct sockaddr *)sin);
 	}
 	if (inet->cmsg_flags)
 		ip_cmsg_recv_offset(msg, skb, sizeof(struct udphdr), off);
@@ -1354,6 +1383,19 @@ csum_copy_err:
 	msg->msg_flags &= ~MSG_TRUNC;
 	goto try_again;
 }
+
+int udp_pre_connect(struct sock *sk, struct sockaddr *uaddr, int addr_len)
+{
+	/* This check is replicated from __ip4_datagram_connect() and
+	 * intended to prevent BPF program called below from accessing bytes
+	 * that are out of the bound specified by user in addr_len.
+	 */
+	if (addr_len < sizeof(struct sockaddr_in))
+		return -EINVAL;
+
+	return BPF_CGROUP_RUN_PROG_INET4_CONNECT_LOCK(sk, uaddr);
+}
+EXPORT_SYMBOL(udp_pre_connect);
 
 int __udp_disconnect(struct sock *sk, int flags)
 {
@@ -1986,8 +2028,11 @@ void udp_v4_early_demux(struct sk_buff *skb)
 	skb->destructor = sock_efree;
 	dst = rcu_dereference(sk->sk_rx_dst);
 
-	if (dst)
+	/* A dual-stack socket can cache an IPv6 dst. */
+	if (dst && dst->ops->family == AF_INET)
 		dst = dst_check(dst, 0);
+	else
+		dst = NULL;
 	if (dst) {
 		/* set noref for now.
 		 * any place which wants to hold dst has to call
@@ -2056,11 +2101,21 @@ int udp_lib_setsockopt(struct sock *sk, int level, int optname,
 		case 0:
 		case UDP_ENCAP_ESPINUDP:
 		case UDP_ENCAP_ESPINUDP_NON_IKE:
-			up->encap_rcv = xfrm4_udp_encap_rcv;
+#if IS_ENABLED(CONFIG_IPV6)
+			if (sk->sk_family == AF_INET6)
+				up->encap_rcv = ipv6_stub->xfrm6_udp_encap_rcv;
+			else
+#endif
+				up->encap_rcv = xfrm4_udp_encap_rcv;
 			/* FALLTHROUGH */
 		case UDP_ENCAP_L2TPINUDP:
 			up->encap_type = val;
-			udp_encap_enable();
+#if IS_ENABLED(CONFIG_IPV6)
+			if (sk->sk_family == AF_INET6)
+				ipv6_stub->udpv6_encap_enable();
+			else
+#endif
+				udp_encap_enable();
 			break;
 		default:
 			err = -ENOPROTOOPT;
@@ -2260,6 +2315,7 @@ struct proto udp_prot = {
 	.name		   = "UDP",
 	.owner		   = THIS_MODULE,
 	.close		   = udp_lib_close,
+	.pre_connect	   = udp_pre_connect,
 	.connect	   = ip4_datagram_connect,
 	.disconnect	   = udp_disconnect,
 	.ioctl		   = udp_ioctl,

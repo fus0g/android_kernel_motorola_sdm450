@@ -45,10 +45,7 @@ struct cls_bpf_prog {
 	u32 gen_flags;
 	struct tcf_exts exts;
 	u32 handle;
-	union {
-		u32 bpf_fd;
-		u16 bpf_num_ops;
-	};
+	u16 bpf_num_ops;
 	struct sock_filter *bpf_ops;
 	const char *bpf_name;
 	struct tcf_proto *tp;
@@ -73,6 +70,7 @@ static int cls_bpf_exec_opcode(int code)
 	case TC_ACT_OK:
 	case TC_ACT_SHOT:
 	case TC_ACT_STOLEN:
+	case TC_ACT_TRAP:
 	case TC_ACT_REDIRECT:
 	case TC_ACT_UNSPEC:
 		return code;
@@ -101,11 +99,11 @@ static int cls_bpf_classify(struct sk_buff *skb, const struct tcf_proto *tp,
 		} else if (at_ingress) {
 			/* It is safe to push/pull even if skb_shared() */
 			__skb_push(skb, skb->mac_len);
-			bpf_compute_data_end(skb);
+			bpf_compute_data_pointers(skb);
 			filter_res = BPF_PROG_RUN(prog->filter, skb);
 			__skb_pull(skb, skb->mac_len);
 		} else {
-			bpf_compute_data_end(skb);
+			bpf_compute_data_pointers(skb);
 			filter_res = BPF_PROG_RUN(prog->filter, skb);
 		}
 
@@ -352,15 +350,17 @@ static int cls_bpf_prog_from_ops(struct nlattr **tb, struct cls_bpf_prog *prog)
 }
 
 static int cls_bpf_prog_from_efd(struct nlattr **tb, struct cls_bpf_prog *prog,
-				 const struct tcf_proto *tp)
+				 u32 gen_flags, const struct tcf_proto *tp)
 {
 	struct bpf_prog *fp;
 	char *name = NULL;
+	bool skip_sw;
 	u32 bpf_fd;
 
 	bpf_fd = nla_get_u32(tb[TCA_BPF_FD]);
+	skip_sw = gen_flags & TCA_CLS_FLAGS_SKIP_SW;
 
-	fp = bpf_prog_get_type(bpf_fd, BPF_PROG_TYPE_SCHED_CLS);
+	fp = bpf_prog_get_type_dev(bpf_fd, BPF_PROG_TYPE_SCHED_CLS, skip_sw);
 	if (IS_ERR(fp))
 		return PTR_ERR(fp);
 
@@ -375,7 +375,6 @@ static int cls_bpf_prog_from_efd(struct nlattr **tb, struct cls_bpf_prog *prog,
 	}
 
 	prog->bpf_ops = NULL;
-	prog->bpf_fd = bpf_fd;
 	prog->bpf_name = name;
 	prog->filter = fp;
 
@@ -430,7 +429,7 @@ static int cls_bpf_modify_existing(struct net *net, struct tcf_proto *tp,
 	prog->gen_flags = gen_flags;
 
 	ret = is_bpf ? cls_bpf_prog_from_ops(tb, prog) :
-		       cls_bpf_prog_from_efd(tb, prog, tp);
+		       cls_bpf_prog_from_efd(tb, prog, gen_flags, tp);
 	if (ret < 0)
 		goto errout;
 
@@ -559,12 +558,20 @@ static int cls_bpf_dump_bpf_info(const struct cls_bpf_prog *prog,
 static int cls_bpf_dump_ebpf_info(const struct cls_bpf_prog *prog,
 				  struct sk_buff *skb)
 {
-	if (nla_put_u32(skb, TCA_BPF_FD, prog->bpf_fd))
-		return -EMSGSIZE;
+	struct nlattr *nla;
 
 	if (prog->bpf_name &&
 	    nla_put_string(skb, TCA_BPF_NAME, prog->bpf_name))
 		return -EMSGSIZE;
+
+	if (nla_put_u32(skb, TCA_BPF_ID, prog->filter->aux->id))
+		return -EMSGSIZE;
+
+	nla = nla_reserve(skb, TCA_BPF_TAG, sizeof(prog->filter->tag));
+	if (nla == NULL)
+		return -EMSGSIZE;
+
+	memcpy(nla_data(nla), prog->filter->tag, nla_len(nla));
 
 	return 0;
 }

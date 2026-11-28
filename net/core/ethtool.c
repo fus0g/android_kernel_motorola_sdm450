@@ -102,7 +102,6 @@ static const char netdev_features_strings[NETDEV_FEATURE_COUNT][ETH_GSTRING_LEN]
 	[NETIF_F_RXFCS_BIT] =            "rx-fcs",
 	[NETIF_F_RXALL_BIT] =            "rx-all",
 	[NETIF_F_HW_L2FW_DOFFLOAD_BIT] = "l2-fwd-offload",
-	[NETIF_F_BUSY_POLL_BIT] =        "busy-poll",
 	[NETIF_F_HW_TC_BIT] =		 "hw-tc-offload",
 };
 
@@ -550,6 +549,9 @@ int __ethtool_get_link_ksettings(struct net_device *dev,
 	struct ethtool_cmd cmd;
 
 	ASSERT_RTNL();
+
+	if (!netif_device_present(dev))
+		return -ENODEV;
 
 	if (dev->ethtool_ops->get_link_ksettings) {
 		memset(link_ksettings, 0, sizeof(*link_ksettings));

@@ -374,6 +374,7 @@ static void ip6gre_tunnel_uninit(struct net_device *dev)
 static void ip6gre_err(struct sk_buff *skb, struct inet6_skb_parm *opt,
 		       u8 type, u8 code, int offset, __be32 info)
 {
+	struct net *net = dev_net(skb->dev);
 	const struct gre_base_hdr *greh;
 	const struct ipv6hdr *ipv6h;
 	int grehlen = sizeof(*greh);
@@ -446,6 +447,10 @@ static void ip6gre_err(struct sk_buff *skb, struct inet6_skb_parm *opt,
 		if (mtu < IPV6_MIN_MTU)
 			mtu = IPV6_MIN_MTU;
 		t->dev->mtu = mtu;
+		return;
+	case NDISC_REDIRECT:
+		ip6_redirect(skb, net, skb->dev->ifindex, 0,
+			     sock_net_uid(net, NULL));
 		return;
 	}
 
@@ -1165,19 +1170,21 @@ err_alloc_dev:
 	return err;
 }
 
-static void __net_exit ip6gre_exit_net(struct net *net)
+static void __net_exit ip6gre_exit_batch_net(struct list_head *net_list)
 {
+	struct net *net;
 	LIST_HEAD(list);
 
 	rtnl_lock();
-	ip6gre_destroy_tunnels(net, &list);
+	list_for_each_entry(net, net_list, exit_list)
+		ip6gre_destroy_tunnels(net, &list);
 	unregister_netdevice_many(&list);
 	rtnl_unlock();
 }
 
 static struct pernet_operations ip6gre_net_ops = {
 	.init = ip6gre_init_net,
-	.exit = ip6gre_exit_net,
+	.exit_batch = ip6gre_exit_batch_net,
 	.id   = &ip6gre_net_id,
 	.size = sizeof(struct ip6gre_net),
 };

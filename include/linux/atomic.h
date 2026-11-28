@@ -2,6 +2,8 @@
 #ifndef _LINUX_ATOMIC_H
 #define _LINUX_ATOMIC_H
 #include <asm/atomic.h>
+
+#define atomic_cond_read_relaxed(v, c)	smp_cond_load_relaxed(&(v)->counter, (c))
 #include <asm/barrier.h>
 
 /*
@@ -503,7 +505,7 @@
  */
 static inline int atomic_add_unless(atomic_t *v, int a, int u)
 {
-	return __atomic_add_unless(v, a, u) != u;
+	return atomic_fetch_add_unless(v, a, u) != u;
 }
 
 /**

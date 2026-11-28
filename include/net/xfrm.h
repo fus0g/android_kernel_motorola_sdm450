@@ -979,7 +979,6 @@ static inline void xfrm_dst_destroy(struct xfrm_dst *xdst)
 void xfrm_dst_ifdown(struct dst_entry *dst, struct net_device *dev);
 
 struct xfrm_if_parms {
-	char name[IFNAMSIZ];	/* name of XFRM device */
 	int link;		/* ifindex of underlying L2 interface */
 	u32 if_id;		/* interface identifyer */
 };
@@ -987,7 +986,6 @@ struct xfrm_if_parms {
 struct xfrm_if {
 	struct xfrm_if __rcu *next;	/* next interface in list */
 	struct net_device *dev;		/* virtual device associated with interface */
-	struct net_device *phydev;	/* physical device */
 	struct net *net;		/* netns for packet i/o */
 	struct xfrm_if_parms p;		/* interface parms */
 
@@ -1090,7 +1088,7 @@ static inline int __xfrm_policy_check2(struct sock *sk, int dir,
 		return __xfrm_policy_check(sk, ndir, skb, family);
 
 	return	(!net->xfrm.policy_count[dir] && !skb->sp) ||
-		(skb_dst(skb)->flags & DST_NOPOLICY) ||
+		(skb_dst(skb) && (skb_dst(skb)->flags & DST_NOPOLICY)) ||
 		__xfrm_policy_check(sk, ndir, skb, family);
 }
 
@@ -1403,6 +1401,8 @@ struct xfrm4_protocol {
 
 struct xfrm6_protocol {
 	int (*handler)(struct sk_buff *skb);
+	int (*input_handler)(struct sk_buff *skb, int nexthdr, __be32 spi,
+			     int encap_type);
 	int (*cb_handler)(struct sk_buff *skb, int err);
 	int (*err_handler)(struct sk_buff *skb, struct inet6_skb_parm *opt,
 			   u8 type, u8 code, int offset, __be32 info);
@@ -1580,6 +1580,8 @@ int xfrm6_extract_input(struct xfrm_state *x, struct sk_buff *skb);
 int xfrm6_rcv_spi(struct sk_buff *skb, int nexthdr, __be32 spi,
 		  struct ip6_tnl *t);
 int xfrm6_transport_finish(struct sk_buff *skb, int async);
+int xfrm6_rcv_encap(struct sk_buff *skb, int nexthdr, __be32 spi,
+		    int encap_type);
 int xfrm6_rcv_tnl(struct sk_buff *skb, struct ip6_tnl *t);
 int xfrm6_rcv(struct sk_buff *skb);
 int xfrm6_input_addr(struct sk_buff *skb, xfrm_address_t *daddr,
@@ -1601,6 +1603,7 @@ int xfrm6_find_1stfragopt(struct xfrm_state *x, struct sk_buff *skb,
 
 #ifdef CONFIG_XFRM
 int xfrm4_udp_encap_rcv(struct sock *sk, struct sk_buff *skb);
+int xfrm6_udp_encap_rcv(struct sock *sk, struct sk_buff *skb);
 int xfrm_user_policy(struct sock *sk, int optname,
 		     u8 __user *optval, int optlen);
 #else
@@ -1648,12 +1651,13 @@ int xfrm_sk_policy_insert(struct sock *sk, int dir, struct xfrm_policy *pol);
 int km_migrate(const struct xfrm_selector *sel, u8 dir, u8 type,
 	       const struct xfrm_migrate *m, int num_bundles,
 	       const struct xfrm_kmaddress *k);
-struct xfrm_state *xfrm_migrate_state_find(struct xfrm_migrate *m, struct net *net);
+struct xfrm_state *xfrm_migrate_state_find(struct xfrm_migrate *m, struct net *net,
+						u32 if_id);
 struct xfrm_state *xfrm_state_migrate(struct xfrm_state *x,
 				      struct xfrm_migrate *m);
 int xfrm_migrate(const struct xfrm_selector *sel, u8 dir, u8 type,
 		 struct xfrm_migrate *m, int num_bundles,
-		 struct xfrm_kmaddress *k, struct net *net);
+		 struct xfrm_kmaddress *k, struct net *net, u32 if_id);
 #endif
 
 int km_new_mapping(struct xfrm_state *x, xfrm_address_t *ipaddr, __be16 sport);

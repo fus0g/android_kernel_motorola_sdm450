@@ -55,6 +55,15 @@ struct strp_rx_msg {
 	int offset;
 };
 
+/* Layout of skb->cb used by sk_skb BPF programs (upstream ff4f343f6a81).
+ * Only the private data area is used by net/core/filter.c on this kernel;
+ * the 4.9 strparser itself still keeps its state in qdisc_skb_cb.
+ */
+struct sk_skb_cb {
+#define SK_SKB_CB_PRIV_LEN 20
+	unsigned char data[SK_SKB_CB_PRIV_LEN];
+};
+
 static inline struct strp_rx_msg *strp_rx_msg(struct sk_buff *skb)
 {
 	return (struct strp_rx_msg *)((void *)skb->cb +
@@ -89,6 +98,8 @@ static inline void strp_pause(struct strparser *strp)
 
 /* May be called without holding lock for attached socket */
 void strp_unpause(struct strparser *strp);
+/* Must be called with process lock held (lock_sock) */
+void __strp_unpause(struct strparser *strp);
 
 static inline void save_strp_stats(struct strparser *strp,
 				   struct strp_aggr_stats *agg_stats)
@@ -136,7 +147,7 @@ void strp_done(struct strparser *strp);
 void strp_stop(struct strparser *strp);
 void strp_check_rcv(struct strparser *strp);
 int strp_init(struct strparser *strp, struct sock *csk,
-	      struct strp_callbacks *cb);
+	      const struct strp_callbacks *cb);
 void strp_data_ready(struct strparser *strp);
 
 #endif /* __NET_STRPARSER_H_ */

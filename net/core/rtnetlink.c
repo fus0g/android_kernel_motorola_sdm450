@@ -16,6 +16,7 @@
  *	Vitaly E. Lavrov		RTA_OK arithmetics was wrong.
  */
 
+#include <linux/bitops.h>
 #include <linux/errno.h>
 #include <linux/module.h>
 #include <linux/types.h>
@@ -39,6 +40,7 @@
 #include <linux/if_vlan.h>
 #include <linux/pci.h>
 #include <linux/etherdevice.h>
+#include <linux/bpf.h>
 
 #include <asm/uaccess.h>
 
@@ -899,15 +901,14 @@ static size_t rtnl_port_size(const struct net_device *dev,
 		return port_self_size;
 }
 
-static size_t rtnl_xdp_size(const struct net_device *dev)
+static size_t rtnl_xdp_size(void)
 {
 	size_t xdp_size = nla_total_size(0) +	/* nest IFLA_XDP */
-			  nla_total_size(1);	/* XDP_ATTACHED */
+			  nla_total_size(1) +	/* XDP_ATTACHED */
+			  nla_total_size(4) +	/* XDP_PROG_ID (or 1st mode) */
+			  nla_total_size(4);	/* XDP_<mode>_PROG_ID */
 
-	if (!dev->netdev_ops->ndo_xdp)
-		return 0;
-	else
-		return xdp_size;
+	return xdp_size;
 }
 
 static noinline size_t if_nlmsg_size(const struct net_device *dev,
@@ -947,7 +948,8 @@ static noinline size_t if_nlmsg_size(const struct net_device *dev,
 	       + nla_total_size(MAX_PHYS_ITEM_ID_LEN) /* IFLA_PHYS_PORT_ID */
 	       + nla_total_size(MAX_PHYS_ITEM_ID_LEN) /* IFLA_PHYS_SWITCH_ID */
 	       + nla_total_size(IFNAMSIZ) /* IFLA_PHYS_PORT_NAME */
-	       + rtnl_xdp_size(dev) /* IFLA_XDP */
+	       + rtnl_xdp_size() /* IFLA_XDP */
+	       + nla_total_size(4)  /* IFLA_EVENT */
 	       + nla_total_size(1); /* IFLA_PROTO_DOWN */
 
 }
@@ -1254,24 +1256,88 @@ static int rtnl_fill_link_ifmap(struct sk_buff *skb, struct net_device *dev)
 	return 0;
 }
 
-static int rtnl_xdp_fill(struct sk_buff *skb, struct net_device *dev)
+static u32 rtnl_xdp_prog_skb(struct net_device *dev)
 {
-	struct netdev_xdp xdp_op = {};
-	struct nlattr *xdp;
+	const struct bpf_prog *generic_xdp_prog;
+
+	ASSERT_RTNL();
+
+	generic_xdp_prog = rtnl_dereference(dev->xdp_prog);
+	if (!generic_xdp_prog)
+		return 0;
+	return generic_xdp_prog->aux->id;
+}
+
+static u32 rtnl_xdp_prog_drv(struct net_device *dev)
+{
+	return __dev_xdp_query(dev, dev->netdev_ops->ndo_bpf, XDP_QUERY_PROG);
+}
+
+static u32 rtnl_xdp_prog_hw(struct net_device *dev)
+{
+	return __dev_xdp_query(dev, dev->netdev_ops->ndo_bpf,
+			       XDP_QUERY_PROG_HW);
+}
+
+static int rtnl_xdp_report_one(struct sk_buff *skb, struct net_device *dev,
+			       u32 *prog_id, u8 *mode, u8 tgt_mode, u32 attr,
+			       u32 (*get_prog_id)(struct net_device *dev))
+{
+	u32 curr_id;
 	int err;
 
-	if (!dev->netdev_ops->ndo_xdp)
+	curr_id = get_prog_id(dev);
+	if (!curr_id)
 		return 0;
+
+	*prog_id = curr_id;
+	err = nla_put_u32(skb, attr, curr_id);
+	if (err)
+		return err;
+
+	if (*mode != XDP_ATTACHED_NONE)
+		*mode = XDP_ATTACHED_MULTI;
+	else
+		*mode = tgt_mode;
+
+	return 0;
+}
+
+static int rtnl_xdp_fill(struct sk_buff *skb, struct net_device *dev)
+{
+	struct nlattr *xdp;
+	u32 prog_id;
+	int err;
+	u8 mode;
+
 	xdp = nla_nest_start(skb, IFLA_XDP);
 	if (!xdp)
 		return -EMSGSIZE;
-	xdp_op.command = XDP_QUERY_PROG;
-	err = dev->netdev_ops->ndo_xdp(dev, &xdp_op);
+
+	prog_id = 0;
+	mode = XDP_ATTACHED_NONE;
+	err = rtnl_xdp_report_one(skb, dev, &prog_id, &mode, XDP_ATTACHED_SKB,
+				  IFLA_XDP_SKB_PROG_ID, rtnl_xdp_prog_skb);
 	if (err)
 		goto err_cancel;
-	err = nla_put_u8(skb, IFLA_XDP_ATTACHED, xdp_op.prog_attached);
+	err = rtnl_xdp_report_one(skb, dev, &prog_id, &mode, XDP_ATTACHED_DRV,
+				  IFLA_XDP_DRV_PROG_ID, rtnl_xdp_prog_drv);
 	if (err)
 		goto err_cancel;
+	err = rtnl_xdp_report_one(skb, dev, &prog_id, &mode, XDP_ATTACHED_HW,
+				  IFLA_XDP_HW_PROG_ID, rtnl_xdp_prog_hw);
+	if (err)
+		goto err_cancel;
+
+	err = nla_put_u8(skb, IFLA_XDP_ATTACHED, mode);
+	if (err)
+		goto err_cancel;
+
+	if (prog_id && mode != XDP_ATTACHED_MULTI) {
+		err = nla_put_u32(skb, IFLA_XDP_PROG_ID, prog_id);
+		if (err)
+			goto err_cancel;
+	}
 
 	nla_nest_end(skb, xdp);
 	return 0;
@@ -1281,9 +1347,40 @@ err_cancel:
 	return err;
 }
 
+static u32 rtnl_get_event(unsigned long event)
+{
+	u32 rtnl_event_type = IFLA_EVENT_NONE;
+
+	switch (event) {
+	case NETDEV_REBOOT:
+		rtnl_event_type = IFLA_EVENT_REBOOT;
+		break;
+	case NETDEV_FEAT_CHANGE:
+		rtnl_event_type = IFLA_EVENT_FEATURES;
+		break;
+	case NETDEV_BONDING_FAILOVER:
+		rtnl_event_type = IFLA_EVENT_BONDING_FAILOVER;
+		break;
+	case NETDEV_NOTIFY_PEERS:
+		rtnl_event_type = IFLA_EVENT_NOTIFY_PEERS;
+		break;
+	case NETDEV_RESEND_IGMP:
+		rtnl_event_type = IFLA_EVENT_IGMP_RESEND;
+		break;
+	case NETDEV_CHANGEINFODATA:
+		rtnl_event_type = IFLA_EVENT_BONDING_OPTIONS;
+		break;
+	default:
+		break;
+	}
+
+	return rtnl_event_type;
+}
+
 static int rtnl_fill_ifinfo(struct sk_buff *skb, struct net_device *dev,
 			    int type, u32 pid, u32 seq, u32 change,
-			    unsigned int flags, u32 ext_filter_mask)
+			    unsigned int flags, u32 ext_filter_mask,
+			    u32 event)
 {
 	struct ifinfomsg *ifm;
 	struct nlmsghdr *nlh;
@@ -1331,6 +1428,11 @@ static int rtnl_fill_ifinfo(struct sk_buff *skb, struct net_device *dev,
 			atomic_read(&dev->carrier_changes)) ||
 	    nla_put_u8(skb, IFLA_PROTO_DOWN, dev->proto_down))
 		goto nla_put_failure;
+
+	if (event != IFLA_EVENT_NONE) {
+		if (nla_put_u32(skb, IFLA_EVENT, event))
+			goto nla_put_failure;
+	}
 
 	if (rtnl_fill_link_ifmap(skb, dev))
 		goto nla_put_failure;
@@ -1466,6 +1568,7 @@ static const struct nla_policy ifla_policy[IFLA_MAX+1] = {
 	[IFLA_LINK_NETNSID]	= { .type = NLA_S32 },
 	[IFLA_PROTO_DOWN]	= { .type = NLA_U8 },
 	[IFLA_XDP]		= { .type = NLA_NESTED },
+	[IFLA_EVENT]		= { .type = NLA_U32 },
 	[IFLA_GROUP]		= { .type = NLA_U32 },
 };
 
@@ -1508,6 +1611,8 @@ static const struct nla_policy ifla_port_policy[IFLA_PORT_MAX+1] = {
 static const struct nla_policy ifla_xdp_policy[IFLA_XDP_MAX + 1] = {
 	[IFLA_XDP_FD]		= { .type = NLA_S32 },
 	[IFLA_XDP_ATTACHED]	= { .type = NLA_U8 },
+	[IFLA_XDP_FLAGS]	= { .type = NLA_U32 },
+	[IFLA_XDP_PROG_ID]	= { .type = NLA_U32 },
 };
 
 static const struct rtnl_link_ops *linkinfo_to_kind_ops(const struct nlattr *nla)
@@ -1619,7 +1724,7 @@ static int rtnl_dump_ifinfo(struct sk_buff *skb, struct netlink_callback *cb)
 					       NETLINK_CB(cb->skb).portid,
 					       cb->nlh->nlmsg_seq, 0,
 					       flags,
-					       ext_filter_mask);
+					       ext_filter_mask, 0);
 
 			if (err < 0) {
 				if (likely(skb->len))
@@ -1759,7 +1864,7 @@ static int do_setvfinfo(struct net_device *dev, struct nlattr **tb)
 
 		nla_for_each_nested(attr, tb[IFLA_VF_VLAN_LIST], rem) {
 			if (nla_type(attr) != IFLA_VF_VLAN_INFO ||
-			    nla_len(attr) < NLA_HDRLEN) {
+			    nla_len(attr) < sizeof(struct ifla_vf_vlan_info)) {
 				return -EINVAL;
 			}
 			if (len >= MAX_VLAN_LIST_LEN)
@@ -1930,6 +2035,7 @@ static int do_set_master(struct net_device *dev, int ifindex)
 #define DO_SETLINK_NOTIFY	0x03
 static int do_setlink(const struct sk_buff *skb,
 		      struct net_device *dev, struct ifinfomsg *ifm,
+		      struct netlink_ext_ack *extack,
 		      struct nlattr **tb, char *ifname, int status)
 {
 	const struct net_device_ops *ops = dev->netdev_ops;
@@ -2195,19 +2301,34 @@ static int do_setlink(const struct sk_buff *skb,
 
 	if (tb[IFLA_XDP]) {
 		struct nlattr *xdp[IFLA_XDP_MAX + 1];
+		u32 xdp_flags = 0;
 
 		err = nla_parse_nested(xdp, IFLA_XDP_MAX, tb[IFLA_XDP],
 				       ifla_xdp_policy);
 		if (err < 0)
 			goto errout;
 
-		if (xdp[IFLA_XDP_ATTACHED]) {
+		if (xdp[IFLA_XDP_ATTACHED] || xdp[IFLA_XDP_PROG_ID]) {
 			err = -EINVAL;
 			goto errout;
 		}
+
+		if (xdp[IFLA_XDP_FLAGS]) {
+			xdp_flags = nla_get_u32(xdp[IFLA_XDP_FLAGS]);
+			if (xdp_flags & ~XDP_FLAGS_MASK) {
+				err = -EINVAL;
+				goto errout;
+			}
+			if (hweight32(xdp_flags & XDP_FLAGS_MODES) > 1) {
+				err = -EINVAL;
+				goto errout;
+			}
+		}
+
 		if (xdp[IFLA_XDP_FD]) {
-			err = dev_change_xdp_fd(dev,
-						nla_get_s32(xdp[IFLA_XDP_FD]));
+			err = dev_change_xdp_fd(dev, extack,
+						nla_get_s32(xdp[IFLA_XDP_FD]),
+						xdp_flags);
 			if (err)
 				goto errout;
 			status |= DO_SETLINK_NOTIFY;
@@ -2259,7 +2380,7 @@ static int rtnl_setlink(struct sk_buff *skb, struct nlmsghdr *nlh)
 		goto errout;
 	}
 
-	err = do_setlink(skb, dev, ifm, tb, ifname, 0);
+	err = do_setlink(skb, dev, ifm, NULL, tb, ifname, 0);
 errout:
 	return err;
 }
@@ -2405,8 +2526,16 @@ struct net_device *rtnl_create_link(struct net *net,
 	dev->rtnl_link_ops = ops;
 	dev->rtnl_link_state = RTNL_LINK_INITIALIZING;
 
-	if (tb[IFLA_MTU])
-		dev->mtu = nla_get_u32(tb[IFLA_MTU]);
+	if (tb[IFLA_MTU]) {
+		u32 mtu = nla_get_u32(tb[IFLA_MTU]);
+
+		err = dev_validate_mtu(dev, mtu, NULL);
+		if (err) {
+			free_netdev(dev);
+			return ERR_PTR(err);
+		}
+		dev->mtu = mtu;
+	}
 	if (tb[IFLA_ADDRESS]) {
 		memcpy(dev->dev_addr, nla_data(tb[IFLA_ADDRESS]),
 				nla_len(tb[IFLA_ADDRESS]));
@@ -2434,6 +2563,7 @@ EXPORT_SYMBOL(rtnl_create_link);
 static int rtnl_group_changelink(const struct sk_buff *skb,
 		struct net *net, int group,
 		struct ifinfomsg *ifm,
+		struct netlink_ext_ack *extack,
 		struct nlattr **tb)
 {
 	struct net_device *dev, *aux;
@@ -2441,7 +2571,7 @@ static int rtnl_group_changelink(const struct sk_buff *skb,
 
 	for_each_netdev_safe(net, dev, aux) {
 		if (dev->group == group) {
-			err = do_setlink(skb, dev, ifm, tb, NULL, 0);
+			err = do_setlink(skb, dev, ifm, extack, tb, NULL, 0);
 			if (err < 0)
 				return err;
 		}
@@ -2586,14 +2716,15 @@ replay:
 				status |= DO_SETLINK_NOTIFY;
 			}
 
-			return do_setlink(skb, dev, ifm, tb, ifname, status);
+			return do_setlink(skb, dev, ifm, NULL, tb, ifname,
+					  status);
 		}
 
 		if (!(nlh->nlmsg_flags & NLM_F_CREATE)) {
 			if (ifm->ifi_index == 0 && tb[IFLA_GROUP])
 				return rtnl_group_changelink(skb, net,
 						nla_get_u32(tb[IFLA_GROUP]),
-						ifm, tb);
+						ifm, NULL, tb);
 			return -ENODEV;
 		}
 
@@ -2734,7 +2865,7 @@ static int rtnl_getlink(struct sk_buff *skb, struct nlmsghdr* nlh)
 		return -ENOBUFS;
 
 	err = rtnl_fill_ifinfo(nskb, dev, RTM_NEWLINK, NETLINK_CB(skb).portid,
-			       nlh->nlmsg_seq, 0, 0, ext_filter_mask);
+			       nlh->nlmsg_seq, 0, 0, ext_filter_mask, 0);
 	if (err < 0) {
 		/* -EMSGSIZE implies BUG in if_nlmsg_size */
 		WARN_ON(err == -EMSGSIZE);
@@ -2806,7 +2937,8 @@ static int rtnl_dump_all(struct sk_buff *skb, struct netlink_callback *cb)
 }
 
 struct sk_buff *rtmsg_ifinfo_build_skb(int type, struct net_device *dev,
-				       unsigned int change, gfp_t flags)
+				       unsigned int change,
+				       u32 event, gfp_t flags)
 {
 	struct net *net = dev_net(dev);
 	struct sk_buff *skb;
@@ -2817,7 +2949,7 @@ struct sk_buff *rtmsg_ifinfo_build_skb(int type, struct net_device *dev,
 	if (skb == NULL)
 		goto errout;
 
-	err = rtnl_fill_ifinfo(skb, dev, type, 0, 0, change, 0, 0);
+	err = rtnl_fill_ifinfo(skb, dev, type, 0, 0, change, 0, 0, event);
 	if (err < 0) {
 		/* -EMSGSIZE implies BUG in if_nlmsg_size() */
 		WARN_ON(err == -EMSGSIZE);
@@ -2838,17 +2970,24 @@ void rtmsg_ifinfo_send(struct sk_buff *skb, struct net_device *dev, gfp_t flags)
 	rtnl_notify(skb, net, 0, RTNLGRP_LINK, NULL, flags);
 }
 
-void rtmsg_ifinfo(int type, struct net_device *dev, unsigned int change,
-		  gfp_t flags)
+static void rtmsg_ifinfo_event(int type, struct net_device *dev,
+			       unsigned int change, u32 event,
+			       gfp_t flags)
 {
 	struct sk_buff *skb;
 
 	if (dev->reg_state != NETREG_REGISTERED)
 		return;
 
-	skb = rtmsg_ifinfo_build_skb(type, dev, change, flags);
+	skb = rtmsg_ifinfo_build_skb(type, dev, change, event, flags);
 	if (skb)
 		rtmsg_ifinfo_send(skb, dev, flags);
+}
+
+void rtmsg_ifinfo(int type, struct net_device *dev, unsigned int change,
+		  gfp_t flags)
+{
+	rtmsg_ifinfo_event(type, dev, change, IFLA_EVENT_NONE, flags);
 }
 EXPORT_SYMBOL(rtmsg_ifinfo);
 
@@ -2874,7 +3013,7 @@ static int nlmsg_populate_fdb_fill(struct sk_buff *skb,
 	ndm->ndm_ifindex = dev->ifindex;
 	ndm->ndm_state   = ndm_state;
 
-	if (nla_put(skb, NDA_LLADDR, ETH_ALEN, addr))
+	if (nla_put(skb, NDA_LLADDR, dev->addr_len, addr))
 		goto nla_put_failure;
 	if (vid)
 		if (nla_put(skb, NDA_VLAN, sizeof(u16), &vid))
@@ -2888,10 +3027,10 @@ nla_put_failure:
 	return -EMSGSIZE;
 }
 
-static inline size_t rtnl_fdb_nlmsg_size(void)
+static inline size_t rtnl_fdb_nlmsg_size(const struct net_device *dev)
 {
 	return NLMSG_ALIGN(sizeof(struct ndmsg)) +
-	       nla_total_size(ETH_ALEN) +	/* NDA_LLADDR */
+	       nla_total_size(dev->addr_len) +	/* NDA_LLADDR */
 	       nla_total_size(sizeof(u16)) +	/* NDA_VLAN */
 	       0;
 }
@@ -2903,7 +3042,7 @@ static void rtnl_fdb_notify(struct net_device *dev, u8 *addr, u16 vid, int type,
 	struct sk_buff *skb;
 	int err = -ENOBUFS;
 
-	skb = nlmsg_new(rtnl_fdb_nlmsg_size(), GFP_ATOMIC);
+	skb = nlmsg_new(rtnl_fdb_nlmsg_size(dev), GFP_ATOMIC);
 	if (!skb)
 		goto errout;
 
@@ -3628,10 +3767,9 @@ static int rtnl_bridge_dellink(struct sk_buff *skb, struct nlmsghdr *nlh)
 	struct net *net = sock_net(skb->sk);
 	struct ifinfomsg *ifm;
 	struct net_device *dev;
-	struct nlattr *br_spec, *attr = NULL;
+	struct nlattr *br_spec, *attr, *br_flags_attr = NULL;
 	int rem, err = -EOPNOTSUPP;
 	u16 flags = 0;
-	bool have_flags = false;
 
 	if (nlmsg_len(nlh) < sizeof(*ifm))
 		return -EINVAL;
@@ -3649,13 +3787,17 @@ static int rtnl_bridge_dellink(struct sk_buff *skb, struct nlmsghdr *nlh)
 	br_spec = nlmsg_find_attr(nlh, sizeof(struct ifinfomsg), IFLA_AF_SPEC);
 	if (br_spec) {
 		nla_for_each_nested(attr, br_spec, rem) {
-			if (nla_type(attr) == IFLA_BRIDGE_FLAGS) {
+			if (nla_type(attr) == IFLA_BRIDGE_FLAGS && !br_flags_attr) {
 				if (nla_len(attr) < sizeof(flags))
 					return -EINVAL;
 
-				have_flags = true;
+				br_flags_attr = attr;
 				flags = nla_get_u16(attr);
-				break;
+			}
+
+			if (nla_type(attr) == IFLA_BRIDGE_MODE) {
+				if (nla_len(attr) < sizeof(u16))
+					return -EINVAL;
 			}
 		}
 	}
@@ -3692,8 +3834,8 @@ static int rtnl_bridge_dellink(struct sk_buff *skb, struct nlmsghdr *nlh)
 		}
 	}
 
-	if (have_flags)
-		memcpy(nla_data(attr), &flags, sizeof(flags));
+	if (br_flags_attr)
+		memcpy(nla_data(br_flags_attr), &flags, sizeof(flags));
 out:
 	return err;
 }
@@ -4135,7 +4277,8 @@ static int rtnetlink_event(struct notifier_block *this, unsigned long event, voi
 	case NETDEV_BONDING_INFO:
 		break;
 	default:
-		rtmsg_ifinfo(RTM_NEWLINK, dev, 0, GFP_KERNEL);
+		rtmsg_ifinfo_event(RTM_NEWLINK, dev, 0, rtnl_get_event(event),
+				   GFP_KERNEL);
 		break;
 	}
 	return NOTIFY_DONE;

@@ -217,11 +217,7 @@ static struct sock *tcp_fastopen_create_child(struct sock *sk,
 	atomic_set(&req->rsk_refcnt, 2);
 
 	/* Now finish processing the fastopen child socket. */
-	inet_csk(child)->icsk_af_ops->rebuild_header(child);
-	tcp_init_congestion_control(child);
-	tcp_mtup_init(child);
-	tcp_init_metrics(child);
-	tcp_init_buffer_space(child);
+	tcp_init_transfer(child, BPF_SOCK_OPS_PASSIVE_ESTABLISHED_CB);
 
 	tp->rcv_nxt = TCP_SKB_CB(skb)->seq + 1;
 
@@ -238,6 +234,7 @@ static struct sock *tcp_fastopen_create_child(struct sock *sk,
 static bool tcp_fastopen_queue_check(struct sock *sk)
 {
 	struct fastopen_queue *fastopenq;
+	int max_qlen;
 
 	/* Make sure the listener has enabled fastopen, and we don't
 	 * exceed the max # of pending TFO requests allowed before trying
@@ -250,10 +247,11 @@ static bool tcp_fastopen_queue_check(struct sock *sk)
 	 * temporarily vs a server not supporting Fast Open at all.
 	 */
 	fastopenq = &inet_csk(sk)->icsk_accept_queue.fastopenq;
-	if (fastopenq->max_qlen == 0)
+	max_qlen = READ_ONCE(fastopenq->max_qlen);
+	if (max_qlen == 0)
 		return false;
 
-	if (fastopenq->qlen >= fastopenq->max_qlen) {
+	if (fastopenq->qlen >= max_qlen) {
 		struct request_sock *req1;
 		spin_lock(&fastopenq->lock);
 		req1 = fastopenq->rskq_rst_head;
@@ -341,6 +339,13 @@ bool tcp_fastopen_cookie_check(struct sock *sk, u16 *mss,
 		cookie->len = -1;
 		return false;
 	}
+
+	/* Firewall blackhole issue check */
+	if (tcp_fastopen_active_should_disable(sk)) {
+		cookie->len = -1;
+		return false;
+	}
+
 	if (sysctl_tcp_fastopen & TFO_CLIENT_NO_COOKIE) {
 		cookie->len = -1;
 		return true;
@@ -363,6 +368,8 @@ bool tcp_fastopen_defer_connect(struct sock *sk, int *err)
 
 	if (tp->fastopen_connect && !tp->fastopen_req) {
 		if (tcp_fastopen_cookie_check(sk, &mss, &cookie)) {
+			WRITE_ONCE(tp->snd_una, tp->write_seq);
+			WRITE_ONCE(tp->snd_nxt, tp->write_seq);
 			inet_sk(sk)->defer_connect = 1;
 			return true;
 		}
@@ -380,3 +387,111 @@ bool tcp_fastopen_defer_connect(struct sock *sk, int *err)
 	return false;
 }
 EXPORT_SYMBOL(tcp_fastopen_defer_connect);
+
+/*
+ * The following code block is to deal with middle box issues with TFO:
+ * Middlebox firewall issues can potentially cause server's data being
+ * blackholed after a successful 3WHS using TFO.
+ * The proposed solution is to disable active TFO globally under the
+ * following circumstances:
+ *   1. client side TFO socket receives out of order FIN
+ *   2. client side TFO socket receives out of order RST
+ * We disable active side TFO globally for 1hr at first. Then if it
+ * happens again, we disable it for 2h, then 4h, 8h, ...
+ * And we reset the timeout back to 1hr when we see a successful active
+ * TFO connection with data exchanges.
+ * With net.ipv4.tcp_fastopen_blackhole_timeout_sec at 0, the default,
+ * none of this happens.
+ */
+
+/* Disable active TFO and record current jiffies and
+ * tfo_active_disable_times
+ */
+void tcp_fastopen_active_disable(struct sock *sk)
+{
+	struct net *net = sock_net(sk);
+
+	if (!READ_ONCE(sock_net(sk)->ipv4.sysctl_tcp_fastopen_blackhole_timeout))
+		return;
+
+	/* Paired with READ_ONCE() in tcp_fastopen_active_should_disable() */
+	WRITE_ONCE(net->ipv4.tfo_active_disable_stamp, jiffies);
+
+	/* Paired with smp_rmb() in tcp_fastopen_active_should_disable().
+	 * We want net->ipv4.tfo_active_disable_stamp to be updated first.
+	 */
+	smp_mb__before_atomic();
+	atomic_inc(&net->ipv4.tfo_active_disable_times);
+}
+
+/* Calculate timeout for tfo active disable
+ * Return true if we are still in the active TFO disable period
+ * Return false if timeout already expired and we should use active TFO
+ */
+bool tcp_fastopen_active_should_disable(struct sock *sk)
+{
+	unsigned int tfo_bh_timeout =
+		READ_ONCE(sock_net(sk)->ipv4.sysctl_tcp_fastopen_blackhole_timeout);
+	unsigned long timeout;
+	int tfo_da_times;
+	int multiplier;
+
+	if (!tfo_bh_timeout)
+		return false;
+
+	tfo_da_times = atomic_read(&sock_net(sk)->ipv4.tfo_active_disable_times);
+	if (!tfo_da_times)
+		return false;
+
+	/* Paired with smp_mb__before_atomic() in tcp_fastopen_active_disable() */
+	smp_rmb();
+
+	/* Limit timeout to max: 2^6 * initial timeout */
+	multiplier = 1 << min(tfo_da_times - 1, 6);
+
+	/* Paired with the WRITE_ONCE() in tcp_fastopen_active_disable(). */
+	timeout = READ_ONCE(sock_net(sk)->ipv4.tfo_active_disable_stamp) +
+		  multiplier * tfo_bh_timeout * HZ;
+	if (time_before(jiffies, timeout))
+		return true;
+
+	/* Mark check bit so we can check for successful active TFO
+	 * condition and reset tfo_active_disable_times
+	 */
+	tcp_sk(sk)->syn_fastopen_ch = 1;
+	return false;
+}
+
+/* Disable active TFO if FIN is the only packet in the ofo queue
+ * and no data is received.
+ * Also check if we can reset tfo_active_disable_times if data is
+ * received successfully on a marked active TFO sockets opened on
+ * a non-loopback interface
+ */
+void tcp_fastopen_active_disable_ofo_check(struct sock *sk)
+{
+	struct tcp_sock *tp = tcp_sk(sk);
+	struct rb_node *p;
+	struct sk_buff *skb;
+	struct dst_entry *dst;
+
+	if (!tp->syn_fastopen)
+		return;
+
+	if (!tp->data_segs_in) {
+		p = rb_first(&tp->out_of_order_queue);
+		if (p && !rb_next(p)) {
+			skb = rb_entry(p, struct sk_buff, rbnode);
+			if (TCP_SKB_CB(skb)->tcp_flags & TCPHDR_FIN) {
+				tcp_fastopen_active_disable(sk);
+				return;
+			}
+		}
+	} else if (tp->syn_fastopen_ch &&
+		   atomic_read(&sock_net(sk)->ipv4.tfo_active_disable_times)) {
+		dst = sk_dst_get(sk);
+		if (!(dst && dst->dev && (dst->dev->flags & IFF_LOOPBACK)))
+			atomic_set(&sock_net(sk)->ipv4.tfo_active_disable_times, 0);
+		dst_release(dst);
+	}
+}

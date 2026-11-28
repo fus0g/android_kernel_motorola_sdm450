@@ -135,6 +135,21 @@ int tcp_twsk_unique(struct sock *sk, struct sock *sktw, void *twp)
 }
 EXPORT_SYMBOL_GPL(tcp_twsk_unique);
 
+static int tcp_v4_pre_connect(struct sock *sk, struct sockaddr *uaddr,
+			      int addr_len)
+{
+	/* This check is replicated from tcp_v4_connect() and intended to
+	 * prevent BPF program called below from accessing bytes that are out
+	 * of the bound specified by user in addr_len.
+	 */
+	if (addr_len < sizeof(struct sockaddr_in))
+		return -EINVAL;
+
+	sock_owned_by_me(sk);
+
+	return BPF_CGROUP_RUN_PROG_INET4_CONNECT(sk, uaddr);
+}
+
 /* This will initiate an outgoing connection. */
 int tcp_v4_connect(struct sock *sk, struct sockaddr *uaddr, int addr_len)
 {
@@ -405,7 +420,7 @@ void tcp_v4_err(struct sk_buff *icmp_skb, u32 info)
 		if (!(type == ICMP_DEST_UNREACH && code == ICMP_FRAG_NEEDED))
 			__NET_INC_STATS(net, LINUX_MIB_LOCKDROPPEDICMPS);
 	}
-	if (sk->sk_state == TCP_CLOSE)
+	if (sk->sk_state == TCP_CLOSE || inet_sk(sk)->defer_connect)
 		goto out;
 
 	if (unlikely(iph->ttl < inet_sk(sk)->min_ttl)) {
@@ -826,14 +841,9 @@ static void tcp_v4_reqsk_send_ack(const struct sock *sk, struct sk_buff *skb,
 	u32 seq = (sk->sk_state == TCP_LISTEN) ? tcp_rsk(req)->snt_isn + 1 :
 					     tcp_sk(sk)->snd_nxt;
 
-	/* RFC 7323 2.3
-	 * The window field (SEG.WND) of every outgoing segment, with the
-	 * exception of <SYN> segments, MUST be right-shifted by
-	 * Rcv.Wind.Shift bits:
-	 */
 	tcp_v4_send_ack(sk, skb, seq,
 			tcp_rsk(req)->rcv_nxt,
-			req->rsk_rcv_wnd >> inet_rsk(req)->rcv_wscale,
+			tcp_synack_window(req) >> inet_rsk(req)->rcv_wscale,
 			tcp_time_stamp,
 			req->ts_recent,
 			0,
@@ -1892,8 +1902,13 @@ void tcp_v4_destroy_sock(struct sock *sk)
 
 	tcp_cleanup_congestion_control(sk);
 
+	tcp_cleanup_ulp(sk);
+
 	/* Cleanup up the write buffer. */
 	tcp_write_queue_purge(sk);
+
+	/* Check if we want to disable active TFO */
+	tcp_fastopen_active_disable_ofo_check(sk);
 
 	/* Cleans up our, hopefully empty, out_of_order_queue. */
 	skb_rbtree_purge(&tp->out_of_order_queue);
@@ -2405,6 +2420,7 @@ struct proto tcp_prot = {
 	.name			= "TCP",
 	.owner			= THIS_MODULE,
 	.close			= tcp_close,
+	.pre_connect		= tcp_v4_pre_connect,
 	.connect		= tcp_v4_connect,
 	.disconnect		= tcp_disconnect,
 	.accept			= inet_csk_accept,
@@ -2449,6 +2465,9 @@ EXPORT_SYMBOL(tcp_prot);
 static void __net_exit tcp_sk_exit(struct net *net)
 {
 	int cpu;
+
+	if (net->ipv4.tcp_congestion_control)
+		module_put(net->ipv4.tcp_congestion_control->owner);
 
 	for_each_possible_cpu(cpu)
 		inet_ctl_sock_destroy(*per_cpu_ptr(net->ipv4.tcp_sk, cpu));
@@ -2501,6 +2520,16 @@ static int __net_init tcp_sk_init(struct net *net)
 	net->ipv4.sysctl_tcp_orphan_retries = 0;
 	net->ipv4.sysctl_tcp_fin_timeout = TCP_FIN_TIMEOUT;
 	net->ipv4.sysctl_tcp_notsent_lowat = UINT_MAX;
+
+	net->ipv4.sysctl_tcp_fastopen_blackhole_timeout = 0;
+	atomic_set(&net->ipv4.tfo_active_disable_times, 0);
+
+	/* Reno is always built in */
+	if (!net_eq(net, &init_net) &&
+	    try_module_get(init_net.ipv4.tcp_congestion_control->owner))
+		net->ipv4.tcp_congestion_control = init_net.ipv4.tcp_congestion_control;
+	else
+		net->ipv4.tcp_congestion_control = &tcp_reno;
 
 	return 0;
 fail:

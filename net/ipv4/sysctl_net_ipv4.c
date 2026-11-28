@@ -177,6 +177,8 @@ static int proc_tcp_default_init_rwnd(struct ctl_table *ctl, int write,
 static int proc_tcp_congestion_control(struct ctl_table *ctl, int write,
 				       void __user *buffer, size_t *lenp, loff_t *ppos)
 {
+	struct net *net = container_of(ctl->data, struct net,
+				       ipv4.tcp_congestion_control);
 	char val[TCP_CA_NAME_MAX];
 	struct ctl_table tbl = {
 		.data = val,
@@ -184,11 +186,27 @@ static int proc_tcp_congestion_control(struct ctl_table *ctl, int write,
 	};
 	int ret;
 
-	tcp_get_default_congestion_control(val);
+	tcp_get_default_congestion_control(net, val);
 
 	ret = proc_dostring(&tbl, write, buffer, lenp, ppos);
 	if (write && ret == 0)
-		ret = tcp_set_default_congestion_control(val);
+		ret = tcp_set_default_congestion_control(net, val);
+	return ret;
+}
+
+static int proc_tfo_blackhole_detect_timeout(struct ctl_table *table,
+					     int write,
+					     void __user *buffer,
+					     size_t *lenp, loff_t *ppos)
+{
+	struct net *net = container_of(table->data, struct net,
+	    ipv4.sysctl_tcp_fastopen_blackhole_timeout);
+	int ret;
+
+	ret = proc_dointvec_minmax(table, write, buffer, lenp, ppos);
+	if (write && ret == 0)
+		atomic_set(&net->ipv4.tfo_active_disable_times, 0);
+
 	return ret;
 }
 
@@ -281,6 +299,24 @@ bad_key:
 		 user_key[0], user_key[1], user_key[2], user_key[3],
 	       (char *)tbl.data, ret);
 	kfree(tbl.data);
+	return ret;
+}
+
+static int proc_tcp_available_ulp(struct ctl_table *ctl,
+				  int write,
+				  void __user *buffer, size_t *lenp,
+				  loff_t *ppos)
+{
+	struct ctl_table tbl = { .maxlen = TCP_ULP_BUF_MAX, };
+	int ret;
+
+	tbl.data = kmalloc(tbl.maxlen, GFP_USER);
+	if (!tbl.data)
+		return -ENOMEM;
+	tcp_get_available_ulp(tbl.data, TCP_ULP_BUF_MAX);
+	ret = proc_dostring(&tbl, write, buffer, lenp, ppos);
+	kfree(tbl.data);
+
 	return ret;
 }
 
@@ -515,12 +551,6 @@ static struct ctl_table ipv4_table[] = {
 		.proc_handler	= proc_dointvec,
 	},
 	{
-		.procname	= "tcp_congestion_control",
-		.mode		= 0644,
-		.maxlen		= TCP_CA_NAME_MAX,
-		.proc_handler	= proc_tcp_congestion_control,
-	},
-	{
 		.procname	= "tcp_workaround_signed_windows",
 		.data		= &sysctl_tcp_workaround_signed_windows,
 		.maxlen		= sizeof(int),
@@ -579,18 +609,6 @@ static struct ctl_table ipv4_table[] = {
 	},
 #endif /* CONFIG_NETLABEL */
 	{
-		.procname	= "tcp_available_congestion_control",
-		.maxlen		= TCP_CA_BUF_MAX,
-		.mode		= 0444,
-		.proc_handler   = proc_tcp_available_congestion_control,
-	},
-	{
-		.procname	= "tcp_allowed_congestion_control",
-		.maxlen		= TCP_CA_BUF_MAX,
-		.mode		= 0644,
-		.proc_handler   = proc_allowed_congestion_control,
-	},
-	{
 		.procname       = "tcp_thin_linear_timeouts",
 		.data           = &sysctl_tcp_thin_linear_timeouts,
 		.maxlen         = sizeof(int),
@@ -639,6 +657,12 @@ static struct ctl_table ipv4_table[] = {
 		.proc_handler	= proc_dointvec_minmax,
 		.extra1		= &zero,
 		.extra2		= &thousand,
+	},
+	{
+		.procname	= "tcp_available_ulp",
+		.maxlen		= TCP_ULP_BUF_MAX,
+		.mode		= 0444,
+		.proc_handler   = proc_tcp_available_ulp,
 	},
 	{
 		.procname	= "tcp_autocorking",
@@ -947,6 +971,33 @@ static struct ctl_table ipv4_net_table[] = {
 	},
 #endif
 	{
+		.procname	= "tcp_fastopen_blackhole_timeout_sec",
+		.data		= &init_net.ipv4.sysctl_tcp_fastopen_blackhole_timeout,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_tfo_blackhole_detect_timeout,
+		.extra1		= &zero,
+	},
+	{
+		.procname	= "tcp_congestion_control",
+		.data		= &init_net.ipv4.tcp_congestion_control,
+		.mode		= 0644,
+		.maxlen		= TCP_CA_NAME_MAX,
+		.proc_handler	= proc_tcp_congestion_control,
+	},
+	{
+		.procname	= "tcp_available_congestion_control",
+		.maxlen		= TCP_CA_BUF_MAX,
+		.mode		= 0444,
+		.proc_handler   = proc_tcp_available_congestion_control,
+	},
+	{
+		.procname	= "tcp_allowed_congestion_control",
+		.maxlen		= TCP_CA_BUF_MAX,
+		.mode		= 0644,
+		.proc_handler   = proc_allowed_congestion_control,
+	},
+	{
 		.procname	= "tcp_keepalive_time",
 		.data		= &init_net.ipv4.sysctl_tcp_keepalive_time,
 		.maxlen		= sizeof(int),
@@ -1061,9 +1112,19 @@ static __net_init int ipv4_sysctl_init_net(struct net *net)
 		if (!table)
 			goto err_alloc;
 
-		/* Update the variables to point into the current struct net */
-		for (i = 0; i < ARRAY_SIZE(ipv4_net_table) - 1; i++)
-			table[i].data += (void *)net - (void *)&init_net;
+		for (i = 0; i < ARRAY_SIZE(ipv4_net_table) - 1; i++) {
+			if (table[i].data) {
+				/* Update the variables to point into
+				 * the current struct net
+				 */
+				table[i].data += (void *)net - (void *)&init_net;
+			} else {
+				/* Entries without data pointer are global;
+				 * Make them read-only in non-init_net ns
+				 */
+				table[i].mode &= ~0222;
+			}
+		}
 	}
 
 	net->ipv4.ipv4_hdr = register_net_sysctl(net, "net/ipv4", table);

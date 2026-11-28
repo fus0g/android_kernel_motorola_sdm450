@@ -245,16 +245,11 @@ postcore_initcall(bdi_class_init);
 
 static int __init default_bdi_init(void)
 {
-	int err;
-
 	bdi_wq = alloc_workqueue("writeback", WQ_MEM_RECLAIM | WQ_FREEZABLE |
 					      WQ_UNBOUND | WQ_SYSFS, 0);
 	if (!bdi_wq)
 		return -ENOMEM;
-
-	err = bdi_init(&noop_backing_dev_info);
-
-	return err;
+	return 0;
 }
 subsys_initcall(default_bdi_init);
 
@@ -381,7 +376,10 @@ static void wb_shutdown(struct bdi_writeback *wb)
 	 * the barrier provided by test_and_clear_bit() above.
 	 */
 	smp_wmb();
-	clear_bit(WB_shutting_down, &wb->state);
+	clear_bit_unlock(WB_shutting_down, &wb->state);
+	/* See wake_up_bit() for which memory barrier you need to use. */
+	smp_mb__after_atomic();
+	wake_up_bit(&wb->state, WB_shutting_down);
 }
 
 static void wb_exit(struct bdi_writeback *wb)
@@ -929,18 +927,19 @@ void bdi_unregister(struct backing_dev_info *bdi)
 	wb_shutdown(&bdi->wb);
 	cgwb_bdi_unregister(bdi);
 
-	/*
-	 * If this BDI's min ratio has been set, use bdi_set_min_ratio() to
-	 * update the global bdi_min_ratio.
-	 */
-	if (bdi->min_ratio)
-		bdi_set_min_ratio(bdi, 0);
-
 	if (bdi->dev) {
 		bdi_debug_unregister(bdi);
 		device_unregister(bdi->dev);
 		bdi->dev = NULL;
 	}
+
+	/*
+	 * If this BDI's min ratio has been set, use bdi_set_min_ratio() to
+	 * update the global bdi_min_ratio. After device_unregister(): the
+	 * sysfs min_ratio stores can no longer run and set it again.
+	 */
+	if (bdi->min_ratio)
+		bdi_set_min_ratio(bdi, 0);
 
 	if (bdi->owner) {
 		put_device(bdi->owner);

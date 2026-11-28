@@ -23,6 +23,7 @@
 #include <linux/poll.h>
 #include <linux/workqueue.h>
 #include <linux/kref.h>
+#include <linux/idr.h>
 #include <linux/xattr.h>
 
 /** Max number of pages that can be used in a single read request */
@@ -557,6 +558,10 @@ struct fuse_conn {
 	/** passthrough IO. */
 	unsigned passthrough:1;
 
+	/** files the daemon handed over with FUSE_DEV_IOC_PASSTHROUGH_OPEN_V2,
+	 *  not yet claimed by an open reply (under lock) */
+	struct idr passthrough_req;
+
 	/*
 	 * The following bitfields are only for optimization purposes
 	 * and hence races in setting them will not cause malfunction
@@ -708,7 +713,6 @@ static inline u64 get_node_id(struct inode *inode)
 
 static inline void fuse_make_bad(struct inode *inode)
 {
-	remove_inode_hash(inode);
 	set_bit(FUSE_I_BAD, &get_fuse_inode(inode)->state);
 }
 

@@ -381,26 +381,29 @@ static int bond_update_speed_duplex(struct slave *slave)
 	struct ethtool_link_ksettings ecmd;
 	int res;
 
-	slave->speed = SPEED_UNKNOWN;
-	slave->duplex = DUPLEX_UNKNOWN;
-
 	res = __ethtool_get_link_ksettings(slave_dev, &ecmd);
 	if (res < 0)
-		return 1;
+		goto speed_duplex_unknown;
 	if (ecmd.base.speed == 0 || ecmd.base.speed == ((__u32)-1))
-		return 1;
+		goto speed_duplex_unknown;
 	switch (ecmd.base.duplex) {
 	case DUPLEX_FULL:
 	case DUPLEX_HALF:
 		break;
 	default:
-		return 1;
+		goto speed_duplex_unknown;
 	}
 
 	slave->speed = ecmd.base.speed;
 	slave->duplex = ecmd.base.duplex;
 
 	return 0;
+
+speed_duplex_unknown:
+	slave->speed = SPEED_UNKNOWN;
+	slave->duplex = DUPLEX_UNKNOWN;
+
+	return 1;
 }
 
 const char *bond_slave_link_status(s8 link)
@@ -1134,6 +1137,11 @@ static void bond_setup_by_slave(struct net_device *bond_dev,
 
 	memcpy(bond_dev->broadcast, slave_dev->broadcast,
 		slave_dev->addr_len);
+
+	if (slave_dev->flags & IFF_POINTOPOINT) {
+		bond_dev->flags &= ~(IFF_BROADCAST | IFF_MULTICAST);
+		bond_dev->flags |= (IFF_POINTOPOINT | IFF_NOARP);
+	}
 }
 
 /* On bonding slaves other than the currently active slave, suppress
@@ -1815,9 +1823,11 @@ err_undo_flags:
 					    slave_dev->dev_addr))
 			eth_hw_addr_random(bond_dev);
 		if (bond_dev->type != ARPHRD_ETHER) {
+			unsigned int slave_flag = bond_dev->flags & IFF_SLAVE;
+
 			dev_close(bond_dev);
 			ether_setup(bond_dev);
-			bond_dev->flags |= IFF_MASTER;
+			bond_dev->flags |= IFF_MASTER | slave_flag;
 			bond_dev->priv_flags &= ~IFF_TX_SKB_SHARING;
 		}
 	}
@@ -1838,7 +1848,7 @@ err_undo_flags:
  */
 static int __bond_release_one(struct net_device *bond_dev,
 			      struct net_device *slave_dev,
-			      bool all)
+			      bool all, bool unregister)
 {
 	struct bonding *bond = netdev_priv(bond_dev);
 	struct slave *slave, *oldcurrent;
@@ -1916,9 +1926,7 @@ static int __bond_release_one(struct net_device *bond_dev,
 		bond_alb_deinit_slave(bond, slave);
 	}
 
-	if (all) {
-		RCU_INIT_POINTER(bond->curr_active_slave, NULL);
-	} else if (oldcurrent == slave) {
+	if (!all && oldcurrent == slave) {
 		/* Note that we hold RTNL over this sequence, so there
 		 * is no concern that another slave add/remove event
 		 * will interfere.
@@ -1985,6 +1993,9 @@ static int __bond_release_one(struct net_device *bond_dev,
 		dev_set_mac_address(slave_dev, &addr);
 	}
 
+	if (unregister)
+		__dev_set_mtu(slave_dev, slave->original_mtu);
+	else
 	dev_set_mtu(slave_dev, slave->original_mtu);
 
 	if (!netif_is_bond_master(slave_dev))
@@ -1998,7 +2009,7 @@ static int __bond_release_one(struct net_device *bond_dev,
 /* A wrapper used because of ndo_del_link */
 int bond_release(struct net_device *bond_dev, struct net_device *slave_dev)
 {
-	return __bond_release_one(bond_dev, slave_dev, false);
+	return __bond_release_one(bond_dev, slave_dev, false, false);
 }
 
 /* First release a slave and then destroy the bond if no more slaves are left.
@@ -2010,7 +2021,7 @@ static int  bond_release_and_destroy(struct net_device *bond_dev,
 	struct bonding *bond = netdev_priv(bond_dev);
 	int ret;
 
-	ret = bond_release(bond_dev, slave_dev);
+	ret = __bond_release_one(bond_dev, slave_dev, false, true);
 	if (ret == 0 && !bond_has_slaves(bond) &&
 	    bond_dev->reg_state != NETREG_UNREGISTERING) {
 		bond_dev->priv_flags |= IFF_DISABLE_NETPOLL;
@@ -2317,22 +2328,23 @@ re_arm:
 	}
 }
 
+static int bond_upper_dev_walk(struct net_device *upper, void *data)
+{
+	__be32 ip = *((__be32 *)data);
+
+	return ip == bond_confirm_addr(upper, 0, ip);
+}
+
 static bool bond_has_this_ip(struct bonding *bond, __be32 ip)
 {
-	struct net_device *upper;
-	struct list_head *iter;
 	bool ret = false;
 
 	if (ip == bond_confirm_addr(bond->dev, 0, ip))
 		return true;
 
 	rcu_read_lock();
-	netdev_for_each_all_upper_dev_rcu(bond->dev, upper, iter) {
-		if (ip == bond_confirm_addr(upper, 0, ip)) {
-			ret = true;
-			break;
-		}
-	}
+	if (netdev_walk_all_upper_dev_rcu(bond->dev, bond_upper_dev_walk, &ip))
+		ret = true;
 	rcu_read_unlock();
 
 	return ret;
@@ -3088,7 +3100,7 @@ static int bond_slave_netdev_event(unsigned long event,
 		if (bond_dev->type != ARPHRD_ETHER)
 			bond_release_and_destroy(bond_dev, slave_dev);
 		else
-			bond_release(bond_dev, slave_dev);
+			__bond_release_one(bond_dev, slave_dev, false, true);
 		break;
 	case NETDEV_UP:
 	case NETDEV_CHANGE:
@@ -4245,8 +4257,6 @@ static const struct net_device_ops bond_netdev_ops = {
 	.ndo_add_slave		= bond_enslave,
 	.ndo_del_slave		= bond_release,
 	.ndo_fix_features	= bond_fix_features,
-	.ndo_neigh_construct	= netdev_default_l2upper_neigh_construct,
-	.ndo_neigh_destroy	= netdev_default_l2upper_neigh_destroy,
 	.ndo_bridge_setlink	= switchdev_port_bridge_setlink,
 	.ndo_bridge_getlink	= switchdev_port_bridge_getlink,
 	.ndo_bridge_dellink	= switchdev_port_bridge_dellink,
@@ -4308,7 +4318,9 @@ void bond_setup(struct net_device *bond_dev)
 
 	bond_dev->hw_features = BOND_VLAN_FEATURES |
 				NETIF_F_HW_VLAN_CTAG_RX |
-				NETIF_F_HW_VLAN_CTAG_FILTER;
+				NETIF_F_HW_VLAN_CTAG_FILTER |
+				NETIF_F_HW_VLAN_STAG_RX |
+				NETIF_F_HW_VLAN_STAG_FILTER;
 
 	bond_dev->hw_features |= NETIF_F_GSO_ENCAP_ALL;
 	bond_dev->features |= bond_dev->hw_features;
@@ -4329,7 +4341,7 @@ static void bond_uninit(struct net_device *bond_dev)
 
 	/* Release the bonded slaves */
 	bond_for_each_slave(bond, slave, iter)
-		__bond_release_one(bond_dev, slave->dev, true);
+		__bond_release_one(bond_dev, slave->dev, true, true);
 	netdev_info(bond_dev, "Released all slaves\n");
 
 	arr = rtnl_dereference(bond->slave_arr);
@@ -4530,7 +4542,7 @@ static int bond_check_params(struct bond_params *params)
 	}
 
 	for (arp_ip_count = 0, i = 0;
-	     (arp_ip_count < BOND_MAX_ARP_TARGETS) && arp_ip_target[i]; i++) {
+	     (i < BOND_MAX_ARP_TARGETS) && arp_ip_target[i]; i++) {
 		__be32 ip;
 
 		/* not a complete check, but good enough to catch mistakes */

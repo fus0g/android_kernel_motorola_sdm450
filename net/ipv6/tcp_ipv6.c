@@ -109,6 +109,21 @@ static __u32 tcp_v6_init_sequence(const struct sk_buff *skb)
 					    tcp_hdr(skb)->source);
 }
 
+static int tcp_v6_pre_connect(struct sock *sk, struct sockaddr *uaddr,
+			      int addr_len)
+{
+	/* This check is replicated from tcp_v6_connect() and intended to
+	 * prevent BPF program called below from accessing bytes that are out
+	 * of the bound specified by user in addr_len.
+	 */
+	if (addr_len < SIN6_LEN_RFC2133)
+		return -EINVAL;
+
+	sock_owned_by_me(sk);
+
+	return BPF_CGROUP_RUN_PROG_INET6_CONNECT(sk, uaddr);
+}
+
 static int tcp_v6_connect(struct sock *sk, struct sockaddr *uaddr,
 			  int addr_len)
 {
@@ -234,6 +249,7 @@ static int tcp_v6_connect(struct sock *sk, struct sockaddr *uaddr,
 	fl6.flowi6_proto = IPPROTO_TCP;
 	fl6.daddr = sk->sk_v6_daddr;
 	fl6.saddr = saddr ? *saddr : np->saddr;
+	fl6.flowlabel = ip6_make_flowinfo(np->tclass, np->flow_label);
 	fl6.flowi6_oif = sk->sk_bound_dev_if;
 	fl6.flowi6_mark = sk->sk_mark;
 	fl6.fl6_dport = usin->sin6_port;
@@ -373,7 +389,7 @@ static void tcp_v6_err(struct sk_buff *skb, struct inet6_skb_parm *opt,
 	if (sock_owned_by_user(sk) && type != ICMPV6_PKT_TOOBIG)
 		__NET_INC_STATS(net, LINUX_MIB_LOCKDROPPEDICMPS);
 
-	if (sk->sk_state == TCP_CLOSE)
+	if (sk->sk_state == TCP_CLOSE || inet_sk(sk)->defer_connect)
 		goto out;
 
 	if (ipv6_hdr(skb)->hop_limit < inet6_sk(sk)->min_hopcount) {
@@ -973,15 +989,10 @@ static void tcp_v6_reqsk_send_ack(const struct sock *sk, struct sk_buff *skb,
 	/* sk->sk_state == TCP_LISTEN -> for regular TCP_SYN_RECV
 	 * sk->sk_state == TCP_SYN_RECV -> for Fast Open.
 	 */
-	/* RFC 7323 2.3
-	 * The window field (SEG.WND) of every outgoing segment, with the
-	 * exception of <SYN> segments, MUST be right-shifted by
-	 * Rcv.Wind.Shift bits:
-	 */
 	tcp_v6_send_ack(sk, skb, (sk->sk_state == TCP_LISTEN) ?
 			tcp_rsk(req)->snt_isn + 1 : tcp_sk(sk)->snd_nxt,
 			tcp_rsk(req)->rcv_nxt,
-			req->rsk_rcv_wnd >> inet_rsk(req)->rcv_wscale,
+			tcp_synack_window(req) >> inet_rsk(req)->rcv_wscale,
 			tcp_time_stamp, req->ts_recent, sk->sk_bound_dev_if,
 			tcp_v6_md5_do_lookup(sk, &ipv6_hdr(skb)->saddr),
 			0, 0);
@@ -1922,6 +1933,7 @@ struct proto tcpv6_prot = {
 	.name			= "TCPv6",
 	.owner			= THIS_MODULE,
 	.close			= tcp_close,
+	.pre_connect		= tcp_v6_pre_connect,
 	.connect		= tcp_v6_connect,
 	.disconnect		= tcp_disconnect,
 	.accept			= inet_csk_accept,

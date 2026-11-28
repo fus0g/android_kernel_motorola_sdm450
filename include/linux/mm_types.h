@@ -51,8 +51,10 @@ struct page {
 						 * inode address_space, or NULL.
 						 * If page mapped as anonymous
 						 * memory, low bit is set, and
-						 * it points to anon_vma object:
-						 * see PAGE_MAPPING_ANON below.
+						 * it points to anon_vma object
+						 * or KSM private structure. See
+						 * PAGE_MAPPING_ANON and
+						 * PAGE_MAPPING_KSM.
 						 */
 		void *s_mem;			/* slab first object */
 		atomic_t compound_mapcount;	/* first tail page */
@@ -209,14 +211,6 @@ struct page {
 	void *virtual;			/* Kernel virtual address (NULL if
 					   not kmapped, ie. highmem) */
 #endif /* WANT_PAGE_VIRTUAL */
-
-#ifdef CONFIG_KMEMCHECK
-	/*
-	 * kmemcheck wants to track the status of each byte in a page; this
-	 * is a pointer to such a status block. NULL if not tracked.
-	 */
-	void *shadow;
-#endif
 
 #ifdef LAST_CPUPID_NOT_IN_PAGE_FLAGS
 	int _last_cpupid;
@@ -475,6 +469,9 @@ struct mm_struct {
 	unsigned long flags; /* Must use atomic bitops to access the bits */
 
 	struct core_state *core_state; /* coredumping support */
+#ifdef CONFIG_MEMBARRIER
+	atomic_t membarrier_state;
+#endif
 #ifdef CONFIG_AIO
 	spinlock_t			ioctx_lock;
 	struct kioctx_table __rcu	*ioctx_table;

@@ -2220,8 +2220,15 @@ static long __tun_chr_ioctl(struct file *file, unsigned int cmd,
 				  "Linktype set failed because interface is up\n");
 			ret = -EBUSY;
 		} else {
+			unsigned char addr_len = tun_get_addr_len(arg);
+
+			/* Addresses were added with the old dev->addr_len. */
+			if (addr_len != tun->dev->addr_len) {
+				dev_uc_flush(tun->dev);
+				dev_mc_flush(tun->dev);
+			}
 			tun->dev->type = (int) arg;
-			tun->dev->addr_len = tun_get_addr_len(tun->dev->type);
+			tun->dev->addr_len = addr_len;
 			tun_debug(KERN_INFO, tun, "linktype set to %d\n",
 				  tun->dev->type);
 			ret = 0;
@@ -2442,7 +2449,7 @@ static int tun_chr_open(struct inode *inode, struct file * file)
 	tfile->socket.file = file;
 	tfile->socket.ops = &tun_socket_ops;
 
-	sock_init_data(&tfile->socket, &tfile->sk);
+	sock_init_data_uid(&tfile->socket, &tfile->sk, current_fsuid());
 
 	tfile->sk.sk_write_space = tun_sock_write_space;
 	tfile->sk.sk_sndbuf = INT_MAX;

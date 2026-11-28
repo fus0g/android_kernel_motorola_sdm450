@@ -41,6 +41,7 @@
 /*--------------------------------------------------------------------------
   Include Files
   ------------------------------------------------------------------------*/
+#include <linux/kmemcheck.h>
 #include <vos_packet.h>
 #include <i_vos_packet.h>
 #include <vos_timer.h>
