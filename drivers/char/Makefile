@@ -68,10 +68,10 @@ obj-$(CONFIG_MSM_ADSPRPC)       += adsprpc_compat.o
 endif
 obj-$(CONFIG_MSM_RDBG)		+= rdbg.o
 obj-$(CONFIG_OKL4_PIPE)		+= okl4_pipe.o
-CFLAGS_okl4_pipe.o			+= -Werror -Wno-unused-but-set-variable
+CFLAGS_okl4_pipe.o			+= -Werror
 obj-$(CONFIG_VSERVICES_SERIAL)		+= vservices_serial.o
-CFLAGS_vservices_serial.o	+= -Werror -Wno-unused-but-set-variable
+CFLAGS_vservices_serial.o	+= -Werror
 obj-$(CONFIG_VSERVICES_SERIAL_CLIENT)	+= vs_serial_client.o
-CFLAGS_vs_serial_client.o	 += -Werror -Wno-unused-but-set-variable
+CFLAGS_vs_serial_client.o	 += -Werror
 obj-$(CONFIG_VSERVICES_SERIAL_SERVER)	+= vs_serial_server.o
-CFLAGS_vs_serial_server.o	+= -Werror -Wno-unused-but-set-variable
+CFLAGS_vs_serial_server.o	+= -Werror
