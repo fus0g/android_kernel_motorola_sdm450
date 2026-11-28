@@ -1444,7 +1444,7 @@ int mmc_set_auto_bkops(struct mmc_card *card, bool enable)
 	}
 
 	ret = mmc_switch(card, EXT_CSD_CMD_SET_NORMAL, EXT_CSD_BKOPS_EN,
-			bkops_en, 0);
+			bkops_en, card->ext_csd.generic_cmd6_time);
 	if (ret) {
 		pr_err("%s: %s: error in setting auto bkops to %d (%d)\n",
 			mmc_hostname(card->host), __func__, enable, ret);
@@ -1519,7 +1519,7 @@ void mmc_start_manual_bkops(struct mmc_card *card)
 	mmc_retune_hold(card->host);
 
 	err = __mmc_switch(card, EXT_CSD_CMD_SET_NORMAL, EXT_CSD_BKOPS_START,
-				1, 0, false, true, false);
+				1, MMC_BKOPS_MAX_TIMEOUT, false, true, false);
 	if (err) {
 		pr_err("%s: Error %d starting manual bkops\n",
 				mmc_hostname(card->host), err);
@@ -4724,7 +4724,8 @@ int mmc_cache_barrier(struct mmc_card *card)
 	 * flush timeout instead a generic CMD6 timeout
 	 */
 	err = mmc_switch(card, EXT_CSD_CMD_SET_NORMAL,
-			EXT_CSD_FLUSH_CACHE, 0x2, 0);
+			EXT_CSD_FLUSH_CACHE, 0x2,
+			MMC_CACHE_FLUSH_TIMEOUT_MS);
 	if (err)
 		pr_err("%s: cache barrier error %d\n",
 				mmc_hostname(host), err);
@@ -4745,7 +4746,8 @@ int mmc_flush_cache(struct mmc_card *card)
 			(card->ext_csd.cache_ctrl & 1) &&
 			(!(card->quirks & MMC_QUIRK_CACHE_DISABLE))) {
 		err = mmc_switch(card, EXT_CSD_CMD_SET_NORMAL,
-				EXT_CSD_FLUSH_CACHE, 1, 0);
+				EXT_CSD_FLUSH_CACHE, 1,
+				MMC_CACHE_FLUSH_TIMEOUT_MS);
 		if (err == -ETIMEDOUT) {
 			pr_err("%s: cache flush timeout\n",
 					mmc_hostname(card->host));
