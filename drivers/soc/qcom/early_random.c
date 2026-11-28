@@ -14,6 +14,7 @@
 
 #include <linux/kernel.h>
 #include <linux/hw_random.h>
+#include <linux/random.h>
 #include <linux/io.h>
 
 #include <soc/qcom/scm.h>
@@ -67,8 +68,11 @@ void __init init_random_pool(void)
 						RANDOM_BUFFER_SIZE);
 		bytes_received = (bytes_received <= RANDOM_BUFFER_SIZE) ?
 					bytes_received : RANDOM_BUFFER_SIZE;
-		add_hwgenerator_randomness(random_buffer, bytes_received,
-					   bytes_received << 3);
+		/*
+		 * Not add_hwgenerator_randomness(): that is for kthreads only
+		 * and this runs in early init.
+		 */
+		add_bootloader_randomness(random_buffer, bytes_received);
 	}
 }
 
